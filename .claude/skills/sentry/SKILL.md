@@ -49,10 +49,11 @@ skill here declares a bare-cmdlet-first command because none of them carry a sec
 statements; this one does, and the declaration stays narrow deliberately.
 
 Scopes needed: `event:read` + `project:read` + `org:read` (a User Auth Token from Settings >
-Account > API > Auth Tokens; resolving issues additionally needs `event:write`, which this
-skill does not use - see Boundaries). A `403` from every endpoint means the stored token is the
-CI-scoped one (`org:ci`, upload-only): stop and ask the user to mint a read-scoped token rather
-than retrying.
+Account > API > Auth Tokens; assigning and resolving issues additionally need `event:write`.
+This skill assigns but never resolves - see Boundaries). A `403` from every endpoint means the
+stored token is the CI-scoped one (`org:ci`, upload-only): stop and ask the user to mint a
+read-scoped token rather than retrying. A `403` on the assign PUT alone means the token is
+read-only: report the issues you could not mark and carry on, never let it block the triage.
 
 ## Retrieval
 
@@ -80,6 +81,8 @@ Endpoints, always by **numeric project id, never the slug** - the slug already r
 | Latest event (stack trace, tags, breadcrumbs, contexts, release) | `GET /api/0/organizations/kangentic/issues/<ISSUE_ID>/events/latest/` |
 | All events for the issue | `GET /api/0/organizations/kangentic/issues/<ISSUE_ID>/events/` |
 | Search issues (mobile project) | `GET /api/0/organizations/kangentic/issues/?project=4511808149651456&query=is:unresolved&statsPeriod=90d&sort=date` |
+| Assign an issue (the triage marker, see below) | `PUT /api/0/organizations/kangentic/issues/<ISSUE_ID>/` body `{"assignedTo":"user:<USER_ID>"}` |
+| Org members (read `user.id` for the actor above) | `GET /api/0/organizations/kangentic/members/` |
 
 The latest-event payload is large; extract what you need rather than dumping it: `entries`
 with `type: "exception"` carries the stack frames, `type: "breadcrumbs"` the trail, `tags`
@@ -128,6 +131,17 @@ search covers completed tasks too - a completed task means the issue was already
 Sentry still shows it unresolved, say that explicitly rather than silently dropping it from the
 report.
 
+**Read `assignedTo` as the second half of that guard.** Assignment is this skill's triage
+marker: an assigned issue has been looked at and has a board task. It is a cheap pre-filter that
+survives the shortId rename problem entirely, since it lives on the issue rather than in a task
+title. Do not let it replace the search, though. Assignment can be stale, and a task can exist
+without one. An assigned issue is simply never reported as new.
+
+A completed task plus a still-recurring issue is the case worth calling out loudest: check the
+event releases against the build that carried the fix before saying it is handled. Task #48 is
+the precedent - it fixed MOBILE-3, and MOBILE-3 crashed again on a later build that contained
+the fix.
+
 ### "Investigate this issue" / "create a follow-up task"
 
 Retrieve the issue and its latest event, diagnose it (below), and create a task **only when
@@ -143,6 +157,20 @@ frames or tags that carry it, not a raw event dump (see Boundaries).
 MCP gotcha, same as other skills that file tasks: when a `create_task` call carries both a long
 description and `labels`, the labels can be dropped. Create the task first, then set labels in
 a separate labels-only `kangentic_update_task` call.
+
+**Then assign every issue the task covers**, using the PUT in the endpoint table above. Filing a
+task and leaving the issue unassigned means the next sweep re-derives the whole cross-reference
+from scratch, which is exactly what the marker exists to prevent. Rules:
+
+- Assign after the task is created, never before, so a failed create cannot leave a false marker.
+- One task can cover several issues. Assign all of them, not just the one that named the task.
+- Assign issues covered by an EXISTING task too when a sweep turns one up unassigned. The signal
+  is only useful if it is complete.
+- Never assign an issue with no board task, and never assign `development` or `e2e` noise. An
+  unassigned issue must keep meaning "nobody has dealt with this".
+- Resolve nothing. Assignment leaves the issue in the unresolved stream where a recurrence stays
+  visible, which is the point: a fix that does not hold shows up as new events on an assigned
+  issue instead of disappearing.
 
 No `attachments` step here, unlike a video-review task: a Sentry issue has no local artifact to
 attach, and attaching a raw event export would violate the no-raw-payload rule below.
@@ -187,10 +215,14 @@ its own board.
 ## Boundaries
 
 - Diagnose and report; fix only when the task explicitly asks for a fix.
-- Reads need no ceremony. **Writes are explicit-request-only**: do not resolve, ignore,
-  archive, assign, edit alert rules, or trigger a Seer/autofix run on an issue unless the user
-  asks for exactly that. This mirrors the Sentry MCP policy in `CLAUDE.md`'s cloud-spend
-  section, which applies to this skill's direct API calls just as much as to the MCP.
+- Reads need no ceremony. **Writes are explicit-request-only, with one carve-out**: do not
+  resolve, ignore, archive, edit alert rules, or trigger a Seer/autofix run on an issue unless
+  the user asks for exactly that. This mirrors the Sentry MCP policy in `CLAUDE.md`'s
+  cloud-spend section, which applies to this skill's direct API calls just as much as to the MCP.
+- **The carve-out is assignment**, and only for an issue you just filed a board task for. That
+  write is sanctioned and expected, no separate ask needed: it is the marker that makes the next
+  triage sweep cheap. It is also the safest of the writes, since it hides nothing and changes no
+  alerting.
 - Create a follow-up board task only when asked ("create a follow-up task" style requests).
 - **Never paste a raw event payload, or a `user.id` / `contexts.device.id` value, into a task,
   commit, PR, reply, or artifact.** Quote only the specific frames and fields that carry the

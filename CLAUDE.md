@@ -261,10 +261,13 @@ see `.claude/rules/e2e-maestro-runs.md`.
   Sentry MCP (remote HTTP, `https://mcp.sentry.dev/mcp/kangentic/mobile`, OAuth as the
   individual developer's personal Sentry account). Querying issues, events, and stack traces is
   ordinary read-only debugging and needs no ceremony. Anything that WRITES - resolving or
-  ignoring an issue, assigning it, editing alert rules, creating or deleting a project or team,
-  or triggering a Seer/autofix run that spends quota - is explicit-request-only, because the
-  issue stream is the project's shared record of what is broken and a bulk resolve is tedious to
-  undo. The URL is deliberately scoped to the one project rather than the org: it narrows the
+  ignoring an issue, editing alert rules, creating or deleting a project or team, or triggering
+  a Seer/autofix run that spends quota - is explicit-request-only, because the issue stream is
+  the project's shared record of what is broken and a bulk resolve is tedious to undo. The one
+  exception is ASSIGNING an issue that a board task was just filed for: `/sentry` does that on
+  its own as a triage marker, so a later sweep can see at a glance what has been looked at. It
+  hides nothing and changes no alerting. The URL is deliberately scoped to the one project
+  rather than the org: it narrows the
   blast radius and drops the org-wide discovery tools from context. Note that crash events
   themselves are app data; treat anything read out of them as covered by
   `.claude/rules/crash-reporting-scope.md` and never paste an event payload into a public
