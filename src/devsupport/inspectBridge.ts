@@ -4,7 +4,7 @@ import { useChannelStore } from '@/state/channelStore';
 import { useDiffStore } from '@/state/diffStore';
 import { usePairingStore } from '@/state/pairingStore';
 import { useTranscriptStore } from '@/state/transcriptStore';
-import { getTerminalFeedStats } from '@/state/terminalFeed';
+import { getTerminalFeedStats, getUnbufferedListenerSessionIds } from '@/state/terminalFeed';
 import {
   decodeInspectRequest,
   encodeInspectHello,
@@ -139,7 +139,11 @@ export async function buildInspectPayload(request: Pick<InspectRequest, 'kind' |
       return subscriptions.debugSnapshot();
     }
     case 'feed-stats':
-      return getTerminalFeedStats();
+      // `unbufferedListeners` is the diagnostic half: a consumer attached to a
+      // session with no ring. Brief and normal mid-swap (the pane has rebound
+      // to the successor, the screen has not retained it yet); a persistent
+      // entry is a leaked subscription.
+      return { rings: getTerminalFeedStats(), unbufferedListeners: getUnbufferedListenerSessionIds() };
     case 'route': {
       const route = getInspectRoute();
       if (!route) throw new Error('Route probe not mounted (is the app UI up?)');

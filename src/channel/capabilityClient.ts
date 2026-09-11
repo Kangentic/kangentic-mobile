@@ -29,13 +29,23 @@ export class CapabilityClient {
     });
   }
 
-  request(verb: CapabilityVerb, payload: JsonValue): Promise<CapabilityResponseMessage> {
+  /**
+   * `timeoutMs` overrides this client's default for ONE request. Most verbs
+   * are a desktop lookup and answer in milliseconds, but a few block on real
+   * work: a `move-task` is answered when the DB row commits on a current
+   * desktop, and on an older one only after the whole move - suspend, worktree
+   * removal, respawn - which measured a 24.4s tail against a 10s default, so a
+   * move the desktop had completed was reported to the user as a failure and
+   * rolled back on the board.
+   */
+  request(verb: CapabilityVerb, payload: JsonValue, options?: { timeoutMs?: number }): Promise<CapabilityResponseMessage> {
     const requestId = bytesToHex(randomBytes(16));
+    const timeoutMs = options?.timeoutMs ?? this.timeoutMs;
     return new Promise<CapabilityResponseMessage>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(requestId);
         reject(new Error(`Capability request "${verb}" timed out`));
-      }, this.timeoutMs);
+      }, timeoutMs);
       this.pending.set(requestId, { resolve, reject, timeout });
 
       try {

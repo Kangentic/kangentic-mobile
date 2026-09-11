@@ -13,7 +13,7 @@ import { parseColsFromScrollback } from '@/terminal/liveTail';
 import { buildModeRestoreSequence } from '@/terminal/modeRestore';
 import { XTERM_BUILD_ID } from '@/terminal/xtermBuildId';
 import type { InspectTerminalHandle, InspectTerminalWriteStats } from '@/devsupport/inspectState';
-import { getBufferedData, getTerminalDimensions, subscribeChunks } from '@/state/terminalFeed';
+import { getBufferedData, getTerminalDimensions, hasBufferedFrame, subscribeChunks } from '@/state/terminalFeed';
 import { useReadingViewStore } from '@/state/readingViewStore';
 import { useTerminalUiStore } from '@/state/terminalUiStore';
 import { refreshTerminalStream, writeTerminal } from '@/connection/actions';
@@ -427,16 +427,33 @@ export function TerminalPane({ sessionId, isActive, cleanFeedEnabled = false }: 
 
   // Session swap under a mounted pane (the desktop respawned the task's
   // session): the WebView survives but its grid belongs to the dead session.
-  // Drop anything queued and re-init from the NEW session's ring immediately;
-  // waiting for a 'seed' event is not enough because the successor's seed may
-  // have landed while this pane was bound to the old session. A clean-feed
-  // flip re-inits the same way (the flag only takes effect at init).
-  const previousInitKeyRef = useRef(`${sessionId}:${cleanFeedEnabled}`);
+  // Drop anything queued and re-init from the NEW session's ring; the
+  // successor's seed may already have landed while this pane was bound to the
+  // old session, so waiting for a 'seed' event alone is not enough.
+  //
+  // But re-init ONLY when the successor has something to paint. A swap
+  // normally arrives before its first snapshot does - SessionScreen retains
+  // the new ring and asks the desktop for it, and the answer is a round trip
+  // away - so an unconditional init here posts an EMPTY grid, which is the
+  // black terminal this whole path is about. Holding the dead session's last
+  // frame until the successor's seed arrives (which re-inits through the
+  // subscribe callback's 'seed' branch above) is stale for a moment and
+  // correct-looking throughout; SessionScreen's switching overlay is what
+  // says so, and what times out if no successor ever arrives.
+  //
+  // The two halves of the key are tracked separately because a clean-feed
+  // flip MUST post even with an empty ring: the flag only takes effect at
+  // init, so skipping it would leave the WebView's parser in the wrong mode.
+  const previousSessionIdRef = useRef(sessionId);
+  const previousCleanFeedRef = useRef(cleanFeedEnabled);
   useEffect(() => {
-    const initKey = `${sessionId}:${cleanFeedEnabled}`;
-    if (previousInitKeyRef.current === initKey) return;
-    previousInitKeyRef.current = initKey;
+    const sessionChanged = previousSessionIdRef.current !== sessionId;
+    const cleanFeedChanged = previousCleanFeedRef.current !== cleanFeedEnabled;
+    if (!sessionChanged && !cleanFeedChanged) return;
+    previousSessionIdRef.current = sessionId;
+    previousCleanFeedRef.current = cleanFeedEnabled;
     if (!terminalReady) return;
+    if (sessionChanged && !cleanFeedChanged && !hasBufferedFrame(sessionId)) return;
     pendingChunksRef.current = [];
     clearFlushTimer();
     postInit();

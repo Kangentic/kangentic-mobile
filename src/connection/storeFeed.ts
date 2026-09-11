@@ -75,6 +75,11 @@ export function createSnapshotSinks(getSubscriptions: () => SubscriptionManager)
       const scope = useDiffStore.getState().byTaskId[taskId]?.scope ?? 'working';
       useDiffStore.getState().applyFileList(taskId, scope, fileList);
     },
+    onDiffFetchFailed: (taskId, scope) => {
+      // The scope the FETCH was for, not whatever the store happens to hold:
+      // a scope switch mid-flight must not mark the new scope failed.
+      useDiffStore.getState().setStatus(taskId, scope, 'error');
+    },
   };
 }
 

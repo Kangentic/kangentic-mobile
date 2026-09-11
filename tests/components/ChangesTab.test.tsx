@@ -140,6 +140,29 @@ describe('ChangesTab', () => {
     expect(screen.queryByTestId('changes-file-list')).toBeNull();
   });
 
+  /**
+   * DiffFetchStatus's 'error' member had no writer until subscribeDiff's catch
+   * started reporting through the sink, so a refused or timed-out fetch sat on
+   * the loading skeleton forever. These two pin the pair of branches that
+   * status now drives.
+   */
+  it('reports a failed fetch when there is no list to show', () => {
+    useDiffStore.getState().reset();
+    useDiffStore.getState().setStatus('task-1', 'working', 'error');
+    renderChangesTab(true);
+    expect(screen.getByText('Could not load changes')).toBeTruthy();
+    expect(screen.queryByTestId('changes-skeleton')).toBeNull();
+  });
+
+  it('keeps a list already on screen when a refresh fails', () => {
+    // The error branch is deliberately behind the fileList check: blanking
+    // readable work because a REFRESH failed is worse than showing it.
+    useDiffStore.getState().setStatus('task-1', 'working', 'error');
+    renderChangesTab(true);
+    expect(screen.getByTestId('changes-file-list')).toBeTruthy();
+    expect(screen.queryByText('Could not load changes')).toBeNull();
+  });
+
   it('shows the Overseer empty state when there are no changes', () => {
     useDiffStore.setState({
       byTaskId: {

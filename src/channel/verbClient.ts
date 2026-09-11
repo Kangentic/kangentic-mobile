@@ -41,6 +41,21 @@ function asRequestJson(payload: unknown): JsonValue {
   return payload as JsonValue;
 }
 
+/**
+ * `move-task` gets its own, far longer timeout: it is the one verb whose
+ * answer waits on real work rather than a lookup.
+ *
+ * A current desktop answers when the board row commits, which is fast. An
+ * older one awaits the whole of handleTaskMove - the PTY suspend, the worktree
+ * removal on a Done move, the respawn on an auto-spawn column. Measured across
+ * a week of desktop IPC logs, 9% of task:move calls ran past 10s and the
+ * slowest took 24.4s, so the shared default turned moves the desktop had
+ * already completed into "Move failed", with the card rolled back underneath
+ * the user. 45s clears that measured tail with headroom while still failing
+ * eventually rather than hanging.
+ */
+const MOVE_TASK_TIMEOUT_MS = 45_000;
+
 /** A capability request the desktop answered with ok:false (or whose response payload failed its parse guard). */
 export class CapabilityError extends Error {
   readonly verb: CapabilityVerb;
@@ -216,7 +231,7 @@ export class VerbClient {
   }
 
   async moveTask(input: MoveTaskRequestPayload): Promise<MoveTaskResponsePayload> {
-    const response = await this.requireOk('move-task', asRequestJson(input));
+    const response = await this.requireOk('move-task', asRequestJson(input), { timeoutMs: MOVE_TASK_TIMEOUT_MS });
     return this.parsePayload('move-task', response, (value) => {
       if (!isRecord(value) || typeof value.ok !== 'boolean') throw new Error('move-task response is missing "ok"');
       return { ok: value.ok };
@@ -271,8 +286,12 @@ export class VerbClient {
     });
   }
 
-  private async requireOk(verb: CapabilityVerb, payload: JsonValue): Promise<CapabilityResponseMessage> {
-    const response = await this.capabilities.request(verb, payload);
+  private async requireOk(
+    verb: CapabilityVerb,
+    payload: JsonValue,
+    options?: { timeoutMs?: number },
+  ): Promise<CapabilityResponseMessage> {
+    const response = await this.capabilities.request(verb, payload, options);
     if (!response.ok) throw new CapabilityError(verb, response.error ?? `The desktop rejected the ${verb} request`);
     return response;
   }

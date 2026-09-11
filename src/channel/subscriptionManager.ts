@@ -19,6 +19,8 @@ export interface SubscriptionSnapshotSinks {
   onStreamRejected(sessionId: string, error: CapabilityError): void;
   onBoardSnapshot(snapshot: ReadBoardSnapshotResponsePayload): void;
   onDiffFileList(taskId: string, fileList: DiffFileListWire): void;
+  /** A diff fetch that failed, so the Changes pane can stop waiting and say so. */
+  onDiffFetchFailed(taskId: string, scope: ReadDiffScope): void;
 }
 
 interface DesiredDiff {
@@ -333,8 +335,16 @@ export class SubscriptionManager {
       this.activeDiffTaskIds.add(taskId);
       this.sinks.onDiffFileList(taskId, fileList);
     } catch {
-      // Screen-driven; the Changes tab surfaces its own loading/error state
-      // and can re-trigger via setDesiredDiff.
+      // Screen-driven, and the Changes tab can re-trigger via setDesiredDiff -
+      // but it can only show the failure if it is TOLD about it. Swallowing
+      // here left `fileListStatus` on 'loading' forever, so a refused or
+      // timed-out diff rendered as a skeleton that never resolved, and
+      // DiffFetchStatus's 'error' member had no writer at all.
+      //
+      // Same staleness guard as the success path: a watch that has since been
+      // dropped or re-scoped must not write over the current one's state.
+      if (this.disposed || this.desiredDiffsByTaskId.get(taskId) !== desired) return;
+      this.sinks.onDiffFetchFailed(taskId, desired.scope);
     }
   }
 

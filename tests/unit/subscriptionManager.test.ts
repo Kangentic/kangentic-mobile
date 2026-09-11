@@ -29,6 +29,7 @@ interface Harness {
     streamRejections: { sessionId: string; error: CapabilityError }[];
     boardSnapshots: string[];
     diffFileLists: string[];
+    diffFetchFailures: { taskId: string; scope: string }[];
   };
 }
 
@@ -81,12 +82,19 @@ async function harness(
     return respond(request);
   });
 
-  const sinkCalls: Harness['sinkCalls'] = { streamSnapshots: [], streamRejections: [], boardSnapshots: [], diffFileLists: [] };
+  const sinkCalls: Harness['sinkCalls'] = {
+    streamSnapshots: [],
+    streamRejections: [],
+    boardSnapshots: [],
+    diffFileLists: [],
+    diffFetchFailures: [],
+  };
   const sinks: SubscriptionSnapshotSinks = {
     onStreamSnapshot: (sessionId) => sinkCalls.streamSnapshots.push(sessionId),
     onStreamRejected: (sessionId, error) => sinkCalls.streamRejections.push({ sessionId, error }),
     onBoardSnapshot: (snapshot) => sinkCalls.boardSnapshots.push(snapshot.projectId),
     onDiffFileList: (taskId) => sinkCalls.diffFileLists.push(taskId),
+    onDiffFetchFailed: (taskId, scope) => sinkCalls.diffFetchFailures.push({ taskId, scope }),
   };
   const verbs = new VerbClient(new CapabilityClient(session));
   const manager = new SubscriptionManager({ session, verbs, sinks });
@@ -426,6 +434,51 @@ describe('SubscriptionManager', () => {
     await flushLoopback();
     // Re-declaring DOES retry (it is a fresh desired set)...
     expect(requests.length).toBe(requestCount + 1);
+  });
+
+  /**
+   * A refused diff fetch used to be swallowed whole. The Changes tab's only
+   * other state is its loading skeleton, so the pane sat on it forever, and
+   * DiffFetchStatus's 'error' member had no writer anywhere in the app.
+   *
+   * The SCOPE matters as much as the taskId: the store keys status by scope,
+   * so reporting the failure without it would let a scope switch mid-flight
+   * mark the wrong one failed.
+   */
+  it('reports a refused diff fetch through the sink, with the scope it was for', async () => {
+    const { stub, manager, sinkCalls } = await harness((request) => {
+      if (request.verb === 'read-diff') {
+        return { type: 'capability-response', requestId: request.requestId, ok: false, error: 'No worktree for task-1' };
+      }
+      return defaultResponder(request);
+    });
+    stub.beginHandshake();
+    await flushLoopback();
+
+    manager.setDesiredDiff('task-1', { projectId: 'project-1', scope: 'branch' });
+    await flushLoopback();
+
+    expect(sinkCalls.diffFetchFailures).toEqual([{ taskId: 'task-1', scope: 'branch' }]);
+    expect(sinkCalls.diffFileLists).toEqual([]);
+  });
+
+  it('does not report a diff failure for a watch that has since been dropped', async () => {
+    const { stub, manager, sinkCalls } = await harness((request) => {
+      if (request.verb === 'read-diff') {
+        return { type: 'capability-response', requestId: request.requestId, ok: false, error: 'No worktree for task-1' };
+      }
+      return defaultResponder(request);
+    });
+    stub.beginHandshake();
+    await flushLoopback();
+
+    manager.setDesiredDiff('task-1', { projectId: 'project-1', scope: 'working' });
+    // Dropped before the refusal comes back: the screen has moved on, and a
+    // late error must not reopen an error state on a pane nobody is watching.
+    manager.setDesiredDiff('task-1', null);
+    await flushLoopback();
+
+    expect(sinkCalls.diffFetchFailures).toEqual([]);
   });
 
   it('removing a desired stream unsubscribes it', async () => {
