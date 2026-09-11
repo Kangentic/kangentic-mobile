@@ -406,13 +406,35 @@ export const useBoardStore = create<BoardStoreState>((set, get) => ({
  */
 export function selectColumnsOrdered(board: ProjectBoard): BoardColumnWire[] {
   return board.columns
-    .filter((column) => (!column.is_archived || column.role === 'done') && !column.is_ghost)
+    .filter((column) => (!column.is_archived || isDoneColumn(column)) && !column.is_ghost)
     .sort((first, second) => first.position - second.position);
+}
+
+/**
+ * The two SYSTEM roles the desktop assigns; every other column carries null.
+ *
+ * `BoardColumnWire.role` is an open `string | null` on the wire, so these
+ * literals are matched by convention at every call site and a typo is silent.
+ * Routing them through here keeps the strings in one place until the protocol
+ * package narrows the field itself (which is where the fix belongs - see
+ * .claude/rules/protocol-types-from-package.md; a local union here would be
+ * exactly the parallel shape that rule forbids).
+ *
+ * What each one MEANS, which is why callers care:
+ * - `done` archives what lands in it, and deletes the task's worktree.
+ * - `todo` is a full reset: session killed, worktree removed, no successor.
+ */
+export function isDoneRole(role: string | null): boolean {
+  return role === 'done';
+}
+
+export function isTodoRole(role: string | null): boolean {
+  return role === 'todo';
 }
 
 /** True for the lane that holds completed work; its cards come from the archive, not the board. */
 export function isDoneColumn(column: BoardColumnWire): boolean {
-  return column.role === 'done';
+  return isDoneRole(column.role);
 }
 
 /** A project's completed tasks; a stable empty value until its first page lands. */

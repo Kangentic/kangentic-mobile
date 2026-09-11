@@ -1,6 +1,11 @@
 import React from 'react';
 import { StyleSheet, View } from 'react-native';
-import { Stack, Text, useTheme } from '@/components';
+import { Button, Row, Stack, Text, useTheme } from '@/components';
+
+export interface SessionSwitchingStateProps {
+  /** Switches the task screen to the Changes pane; diffs outlive the swap. */
+  onViewChanges: () => void;
+}
 
 /**
  * The honest surface for a task between two sessions.
@@ -19,7 +24,7 @@ import { Stack, Text, useTheme } from '@/components';
  * window, and per motion-conventions.md an indicator that never stops holds
  * the app drawing at full frame rate for as long as it is mounted.
  */
-export function SessionSwitchingState(): React.JSX.Element {
+export function SessionSwitchingState({ onViewChanges }: SessionSwitchingStateProps): React.JSX.Element {
   const theme = useTheme();
   return (
     <View
@@ -35,6 +40,17 @@ export function SessionSwitchingState(): React.JSX.Element {
         <Text variant="body" color="secondary" style={styles.caption}>
           The desktop is starting a new session for this task.
         </Text>
+        {/* The one way out while the panes are covered. A swap can run the
+            whole grace window on a slow machine, and the work so far is still
+            readable in the diff. */}
+        <Row gap="sm" style={{ marginTop: theme.spacing.md }}>
+          <Button
+            label="View changes"
+            variant="ghost"
+            onPress={onViewChanges}
+            testID="session-switching-view-changes"
+          />
+        </Row>
       </Stack>
     </View>
   );
