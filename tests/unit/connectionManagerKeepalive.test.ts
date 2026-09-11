@@ -623,6 +623,59 @@ describe('connectionManager background keepalive ceiling', () => {
       label: 'stop retried through reassertForegroundServiceState',
     });
   });
+
+  /**
+   * onKeepaliveWakeSource's OTHER half, exercised through a wake source that is
+   * not AppState. The test above only pins onAppStateChange's own
+   * reassertForegroundServiceState() call; the rekey and transport-blip ceiling
+   * tests above only exercise enforceKeepaliveCeiling(). Nothing in this file
+   * previously proved that a rekey ALSO retries a stop the reconciler still
+   * owes, and deleting `reassertForegroundServiceState();` from
+   * onKeepaliveWakeSource breaks none of those tests.
+   *
+   * Deliberately mirrors the AppState test above almost line for line, with
+   * exactly one difference: the retry's wake source is a rekey on the SAME
+   * still-established connection (stub.beginHandshake()), not a second
+   * onAppStateChange('active') call. The connection is never closed or
+   * reopened here - 'active' only stops the keepalive, it does not tear down
+   * the session - so the stub captured after establishment stays valid and
+   * nothing here has to route back through closeConnection()/openConnection(),
+   * which would introduce transport-state churn of its own. Deleting
+   * `reassertForegroundServiceState();` from onKeepaliveWakeSource makes this
+   * time out waiting for a 4th call instead of reaching it; the AppState test
+   * above stays green either way, since it drives the retry through a
+   * different call site entirely.
+   */
+  it('retries a stop that failed every attempt through a rekey wake source, not just AppState', async () => {
+    const { getActiveConnection } = await import('@/connection/connectionManager');
+    const onAppStateChange = await establishAndWarm();
+    const stub = mockDesktopSeam.stub as StubSessionInitiator;
+
+    onAppStateChange('background');
+    await waitUntil(() => notifeeMocks.displayNotification.mock.calls.length === 1, {
+      label: 'foreground service posted',
+    });
+    // Non-vacuity checkpoint: the service really is up before the stop below.
+    expect(getActiveConnection()).not.toBeNull();
+
+    notifeeMocks.stopForegroundService.mockRejectedValue(new Error('native stop failed'));
+    onAppStateChange('active');
+    await waitUntil(() => notifeeMocks.stopForegroundService.mock.calls.length === 3, {
+      label: 'all three stop attempts exhausted',
+    });
+
+    notifeeMocks.stopForegroundService.mockResolvedValue(undefined);
+    const establishedCountBefore = stub.establishedCount;
+    // No AppState transition anywhere from here on: a 4th call can only come
+    // from onKeepaliveWakeSource's own reassertForegroundServiceState(),
+    // reached through the rekey listener on the still-live session.
+    stub.beginHandshake();
+    await waitUntil(() => stub.establishedCount > establishedCountBefore, { label: 'rekey landed' });
+
+    await waitUntil(() => notifeeMocks.stopForegroundService.mock.calls.length === 4, {
+      label: 'stop retried through the rekey wake source',
+    });
+  });
 });
 
 /**

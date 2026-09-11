@@ -95,6 +95,28 @@ describe('withAndroidPushService manifest', () => {
     expect(notifeeEntries[0].$['android:foregroundServiceType']).toBe('dataSync');
   });
 
+  it('mutates the manifest object it is given, not just the one it returns', () => {
+    // The plugin wrapper discards the return value:
+    // `applyPushServiceManifest(manifestConfig.modResults); return manifestConfig;`
+    // in withAndroidPushService never reads what this function hands back.
+    // Every other test in this file asserts against the RETURNED manifest, so a
+    // refactor that built and returned a structural clone instead of mutating in
+    // place would leave all of them green while breaking prebuild outright: the
+    // manifest expo-cng actually writes to disk would carry none of these changes.
+    const originalManifest = createManifest();
+
+    applyPushServiceManifest(originalManifest);
+
+    expect(permissionNames(originalManifest)).toEqual(
+      expect.arrayContaining([
+        'android.permission.POST_NOTIFICATIONS',
+        'android.permission.FOREGROUND_SERVICE',
+        'android.permission.FOREGROUND_SERVICE_DATA_SYNC',
+      ]),
+    );
+    expect(notifeeService(originalManifest)?.$['android:foregroundServiceType']).toBe('dataSync');
+  });
+
   it('is idempotent, because prebuild can run over its own output', () => {
     const manifest = applyPushServiceManifest(applyPushServiceManifest(createManifest()));
 
