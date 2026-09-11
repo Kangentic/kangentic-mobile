@@ -36,3 +36,32 @@ appId: com.kangentic.mobile
     timeout: 25000
 - assertNotVisible:
     id: "session-ended-state"
+# Back to the lens this flow is actually named for. Everything above runs in
+# CHAT, so for the whole life of the black-terminal bug (the pane lost its feed
+# subscription on every session swap, src/state/terminalFeed.ts) this flow
+# passed green.
+#
+# WHAT THIS CAN AND CANNOT PROVE. xterm paints to a WebGL canvas, so the
+# rendered frame is not in the accessibility hierarchy and NO Maestro
+# assertion can see whether the terminal is black. What it does catch is the
+# pane being torn down, crashing, or being buried under an overlay after the
+# swap - the tap below would fail on the last of those, which is the only way
+# a stacking fault ever surfaces.
+#
+# The frame itself is guarded one tier down, in
+# tests/components/SessionScreen.terminal-swap.test.tsx, which mounts the real
+# TerminalPane and asserts what reaches the WebView bridge across a swap. Do
+# not "strengthen" this flow by asserting terminal text; it cannot work.
+- tapOn:
+    id: "session-mode-terminal"
+- extendedWaitUntil:
+    visible:
+      id: "terminal-webview"
+    timeout: 15000
+- assertNotVisible:
+    id: "session-ended-state"
+# A respawn keeps the task in its column, so the swap grace window never opens
+# and the transitional scrim must not appear either. A future edit that adds a
+# column move to this flow needs to expect this one instead.
+- assertNotVisible:
+    id: "session-switching-state"

@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KeyboardAvoidingView, StyleSheet, View } from 'react-native';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { Screen } from '@/components';
-import { findArchivedTaskById, findTaskById, useBoardStore } from '@/state/boardStore';
+import { findArchivedTaskById, findTaskById, isDoneRole, isTodoRole, useBoardStore } from '@/state/boardStore';
 import { selectSessionEnded, useActivityStore } from '@/state/activityStore';
 import { useSettingsStore } from '@/state/settingsStore';
 import { selectChatLens, useTranscriptStore } from '@/state/transcriptStore';
@@ -156,8 +156,8 @@ export function SessionScreen(): React.JSX.Element {
     // Two destinations promise no successor, so neither gets a grace window:
     // a move to To Do is a full reset (session killed, worktree removed), and
     // a move to Done archives the task, which routes to the completed view.
-    locatedColumnRole !== 'todo' &&
-    locatedColumnRole !== 'done'
+    !isTodoRole(locatedColumnRole) &&
+    !isDoneRole(locatedColumnRole)
   ) {
     setSwapWindowSwimlaneId(locatedSwimlaneId);
   }
@@ -222,7 +222,7 @@ export function SessionScreen(): React.JSX.Element {
    * would sit on the ended state forever.
    */
   const maybeArchived =
-    sessionEnded || locatedColumnRole === 'done' || (!taskLocated && lastBoundSessionId !== null);
+    sessionEnded || isDoneRole(locatedColumnRole) || (!taskLocated && lastBoundSessionId !== null);
   /**
    * Not a single one-shot: the first look can legitimately be too early.
    * Moving to Done writes the task into the done column optimistically, so
@@ -342,6 +342,31 @@ export function SessionScreen(): React.JSX.Element {
     onModeChange('changes');
   }, [onModeChange]);
 
+  /**
+   * BOTH overlays yield to the Changes pane.
+   *
+   * They cover the whole pane area at zIndex 2, so switching the mode
+   * underneath is not enough: an overlay that kept rendering left the user
+   * looking at the same panel they had just tapped out of, and "View changes"
+   * read as a dead button. No tier caught it - `session-ended-state.yaml`
+   * asserts `changes-scope` becomes visible, but all three panes are always
+   * mounted and only their ACCESSIBILITY visibility follows the mode, so that
+   * assertion passed with the pane fully covered. It is the mirror of the
+   * zIndex bug in SessionEndedState's own docblock: that one surfaced because
+   * a TAP was swallowed, which is the only way a stacking fault ever shows.
+   *
+   * Diffs outlive the session, so Changes is exactly where an ended or
+   * switching task still has something to say.
+   */
+  const overlaysYieldToChanges = mode === 'changes';
+  const showSwitchingState = sessionSwitching && !overlaysYieldToChanges;
+  const showEndedState = sessionEnded && !sessionSwitching && !overlaysYieldToChanges;
+  // The footer comes back with them, because in `changes` mode it is only the
+  // mode pill (no composer, no quick keys - see SessionInputBar). Without it
+  // Changes is a one-way trip out of the ended state with nothing but the
+  // system Back button to leave by.
+  const showInputBar = !sessionEnded || overlaysYieldToChanges;
+
   // Move is a native form sheet ROUTE (app/move-task.tsx): this screen only
   // navigates. locatedProjectId, not the param fallback: MoveTaskScreen needs
   // the board that actually HOLDS the task.
@@ -415,8 +440,8 @@ export function SessionScreen(): React.JSX.Element {
               transitional scrim stands in for the ended state rather than
               rendering beside it: two overlays on the same box would fight
               for the same stacking slot. */}
-          {sessionSwitching ? <SessionSwitchingState /> : null}
-          {sessionEnded && !sessionSwitching ? (
+          {showSwitchingState ? <SessionSwitchingState onViewChanges={openChanges} /> : null}
+          {showEndedState ? (
             <SessionEndedState
               onViewChanges={openChanges}
               onMoveTask={locatedProjectId !== null ? openMoveSheet : null}
@@ -425,7 +450,7 @@ export function SessionScreen(): React.JSX.Element {
         </View>
 
         {showModeHint ? <ModeToggleHint onDismiss={dismissModeHint} /> : null}
-        {!sessionEnded ? (
+        {showInputBar ? (
           <SessionInputBar
             sessionId={sessionId}
             mode={mode}

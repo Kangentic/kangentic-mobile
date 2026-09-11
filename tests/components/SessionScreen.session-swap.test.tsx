@@ -35,6 +35,9 @@ jest.mock('@/connection/actions', () => ({
   // directly, so the fetch is a no-op and the screen's routing is driven by
   // the store read, which is the coupling worth pinning.
   loadArchivedTasks: jest.fn().mockResolvedValue(undefined),
+  // Only reached once the Changes pane goes ACTIVE, which no test did until
+  // the View-changes escape hatch below.
+  setDiffWatch: jest.fn(),
 }));
 
 // The panes and the input bar are heavy (FlashList transcript, xterm
@@ -409,6 +412,39 @@ describe('SessionScreen session binding', () => {
   });
 
   /**
+   * The overlay covers the WHOLE pane area, so "View changes" switching the
+   * mode underneath is not enough: an overlay that keeps rendering leaves the
+   * user looking at the same panel they just tapped out of, and the escape
+   * hatch reads as a dead button.
+   *
+   * No existing tier catches this. `session-ended-state.yaml` asserts that
+   * `changes-scope` becomes visible, but all three panes are always mounted
+   * and only their ACCESSIBILITY visibility flips with the mode - so that
+   * assertion passes while the overlay still covers the pane. It is the exact
+   * mirror of the zIndex bug the overlay's own docblock records: that one was
+   * caught because a TAP was swallowed, not because a visibility assert failed.
+   */
+  it('gets out of the way when the user takes the View changes escape hatch', () => {
+    mockParams = { taskId: 'task-1', sessionId: 'sess-a' };
+    seedTaskWithSession('sess-a');
+    renderSessionScreen();
+    act(() => {
+      seedTaskWithSession(null);
+    });
+    expect(screen.getByTestId('session-ended-state')).toBeTruthy();
+
+    fireEvent.press(screen.getByTestId('session-ended-view-changes'));
+
+    expect(screen.queryByTestId('session-ended-state')).toBeNull();
+    // ...and the Changes pane is the one now live behind where it was.
+    expect(screen.getByTestId('session-pane-changes').props.accessibilityElementsHidden).toBe(false);
+    // No mode pill here, and that is real: this task's session is gone
+    // outright, and SessionInputBar renders nothing without one. The way back
+    // is the system Back button. The switching case below, where the screen is
+    // still bound to the outgoing session, does get the pill.
+  });
+
+  /**
    * Under the sessions projection an ended task is dropped from the board, so
    * MoveTaskScreen could not locate it either: the Move button hides while
    * View changes stays (diffs outlive the session).
@@ -555,6 +591,31 @@ describe('SessionScreen across a column move', () => {
     expect(screen.getByTestId('session-switching-state')).toBeTruthy();
     // Nothing to type into between two sessions.
     expect(screen.queryByTestId('stub-session-input-bar')).toBeNull();
+  });
+
+  /**
+   * A swap can hold the screen for the whole grace window on a slow machine,
+   * and the work so far is still readable in the diff - so the scrim carries
+   * the same escape hatch as the ended state, and yields to it.
+   */
+  it('lets the user out to Changes while switching, and comes back with the mode pill', () => {
+    seedRoledBoard('sess-a');
+    renderSessionScreen();
+    act(() => {
+      moveTaskToColumn('lane-doing');
+    });
+    act(() => {
+      pushSessionEnded('sess-a');
+    });
+    expect(screen.getByTestId('session-switching-state')).toBeTruthy();
+
+    fireEvent.press(screen.getByTestId('session-switching-view-changes'));
+
+    expect(screen.queryByTestId('session-switching-state')).toBeNull();
+    expect(screen.getByTestId('session-pane-changes').props.accessibilityElementsHidden).toBe(false);
+    // Still bound to the outgoing session, so the pill is the way back - and
+    // going back to terminal must bring the scrim with it.
+    expect(screen.getByTestId('stub-session-input-bar').props.accessibilityLabel).toBe('changes');
   });
 
   it('clears the switching state when the successor session binds', () => {

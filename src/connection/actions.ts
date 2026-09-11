@@ -1,7 +1,7 @@
 import type { JsonValue, ReadDiffScope } from '@kangentic/protocol';
 import { collapseToSnippetText, findAwaitedToolUse, lastAssistantText, type AwaitedToolUse } from '@/conversation/pendingPromptSummary';
 import { useActivityStore } from '@/state/activityStore';
-import { useBoardStore } from '@/state/boardStore';
+import { isDoneColumn, useBoardStore } from '@/state/boardStore';
 import { useDiffStore } from '@/state/diffStore';
 import { useReadingViewStore } from '@/state/readingViewStore';
 import { useSettingsStore } from '@/state/settingsStore';
@@ -124,7 +124,7 @@ export async function deleteTaskFromBoard(input: { projectId: string; taskId: st
  */
 export async function archiveTask(input: { projectId: string; taskId: string }): Promise<void> {
   const board = useBoardStore.getState().boardsByProjectId[input.projectId];
-  const doneColumn = board?.columns.find((column) => column.role === 'done' && !column.is_ghost);
+  const doneColumn = board?.columns.find((column) => isDoneColumn(column) && !column.is_ghost);
   if (!doneColumn) throw new Error('This board has no Done column to archive into');
   await moveTaskOptimistic({
     projectId: input.projectId,

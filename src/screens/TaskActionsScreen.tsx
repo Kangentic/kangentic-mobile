@@ -5,7 +5,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Icon, Row, Stack, Text, useTheme, type TextColorRole } from '@/components';
 import { CapabilityError } from '@/channel';
 import { archiveTask, deleteTaskFromBoard } from '@/connection/actions';
-import { findTaskById, selectColumnsOrdered, useBoardStore } from '@/state/boardStore';
+import { findTaskById, isDoneColumn, selectColumnsOrdered, useBoardStore } from '@/state/boardStore';
 import { triggerHaptic } from '@/lib/haptics';
 
 /**
@@ -42,7 +42,7 @@ export function TaskActionsScreen(): React.JSX.Element {
   const board = useBoardStore((state) => (projectId ? (state.boardsByProjectId[projectId] ?? null) : null));
   // Archive is a move into the board's done-role column, so it needs one.
   const archiveAvailable = useMemo(
-    () => (board ? selectColumnsOrdered(board).some((column) => column.role === 'done') : false),
+    () => (board ? selectColumnsOrdered(board).some(isDoneColumn) : false),
     [board],
   );
 

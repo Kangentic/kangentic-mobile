@@ -1131,16 +1131,46 @@ function freeStaleMetro() {
 
 function startMetro(flags, extraEnv = {}) {
   if (flags['no-metro']) {
-    log('--no-metro: skipping Metro; run `npx expo start --android` yourself');
+    log('--no-metro: skipping Metro; run `npx expo start` yourself');
     return;
   }
   freeStaleMetro();
-  const args = ['expo', 'start', '--android'];
+  // Deliberately NOT `expo start --android`.
+  //
+  // That launcher enumerates adb devices ITSELF and refuses outright when any
+  // attached device is unauthorized - even though the rig has already chosen
+  // its target and exported ANDROID_SERIAL. With a phone plugged in and its
+  // USB-debugging prompt unanswered, every connected mode died as
+  // "This computer is not authorized for developing on Device <serial>"
+  // followed by `[rig] metro exited (1)`, taking the whole rig with it: the
+  // emulator was booted, the relay was up, and nothing in that output pointed
+  // at the phone. doctor() reports the unauthorized device only as a WARN,
+  // which is now accurate - it costs a device you could have targeted, not
+  // the run.
+  //
+  // So start the bundler alone and open the dev client ourselves, with the
+  // same deep link stub mode already uses after `pm clear`.
+  const args = ['expo', 'start'];
   if (flags.clear) args.push('--clear');
   // Every rig mode enables the dev inspect bridge (dev builds only; the
   // module is stripped from prod bundles). Inlined at bundle time like the
   // mock flag, hence the one-time --clear main() forces when it first flips.
-  const metro = spawnPrefixed('metro', 'npx', args, { env: { EXPO_PUBLIC_KANGENTIC_INSPECT: '1', ...extraEnv } });
+  let devClientOpened = false;
+  const metro = spawnPrefixed('metro', 'npx', args, {
+    env: { EXPO_PUBLIC_KANGENTIC_INSPECT: '1', ...extraEnv },
+    onLine: (line) => {
+      // "Waiting on http://localhost:8081" is the bundler's ready line; it
+      // precedes the first bundle, which the launch itself then triggers.
+      if (devClientOpened || !line.includes('Waiting on http://')) return;
+      devClientOpened = true;
+      const serial = process.env.ANDROID_SERIAL;
+      if (!serial) {
+        warn('no target device recorded; open the app yourself once Metro is up');
+        return;
+      }
+      pointDevClientAtMetro(serial);
+    },
+  });
   // Keep Metro's interactive keys (r = reload, j = devtools) working.
   process.stdin.pipe(metro.stdin);
 }
@@ -1270,7 +1300,7 @@ async function setupShardDevices(shardCount, avdName, flags) {
     // development server with npx expo start") and no JS ever loads - the
     // bootstrap flow then waits out its full timeout for a screen that
     // cannot appear. Point the dev client back at Metro first, the same way
-    // `expo start --android` does for the primary device.
+    // startMetro does for the primary device.
     pointDevClientAtMetro(serial);
     const bootstrap = runShell(`maestro --device ${serial} test -e PAIRING_URI=${pairingUri} .maestro/setup/pairing-bootstrap.yaml`, {
       cwd: repoRoot,
