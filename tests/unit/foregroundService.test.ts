@@ -151,6 +151,10 @@ describe('foregroundService', () => {
   it('releases a parked runner promise before parking the next one', async () => {
     const service = await loadForegroundService();
     service.registerForegroundServiceRunner();
+    // A service the app actually asked for, so the runner parks rather than
+    // taking the "nothing asked for this" exit the next test covers.
+    service.setConnectedForegroundServiceDesired(true);
+    await vi.waitFor(() => expect(service.displayNotification).toHaveBeenCalledTimes(1));
     const runner = service.registerForegroundService.mock.calls[0][0];
     const notification = {} as ForegroundServiceNotification;
 
@@ -168,5 +172,27 @@ describe('foregroundService', () => {
     void runner(notification);
     await flushMicrotasks();
     expect(firstRunnerSettled).toBe(true);
+  });
+
+  it('finishes the runner immediately for a service nothing asked for', async () => {
+    const service = await loadForegroundService();
+    service.registerForegroundServiceRunner();
+    service.stopOrphanedForegroundServiceAtBoot();
+    await vi.waitFor(() => expect(service.stopForegroundService).toHaveBeenCalledTimes(1));
+
+    // Android restarted the service after a process death, so notifee invokes
+    // the runner for a service the boot sweep is stopping. Parking here would
+    // leave the headless JS task alive against a service that no longer exists,
+    // and RN services timers only while a headless task is active - the exact
+    // condition that makes timer behaviour unpredictable app-wide. Removing the
+    // !desiredRunning branch from the runner makes this hang at false.
+    const runner = service.registerForegroundService.mock.calls[0][0];
+    let runnerSettled = false;
+    void runner({} as ForegroundServiceNotification).then(() => {
+      runnerSettled = true;
+    });
+    await flushMicrotasks();
+
+    expect(runnerSettled).toBe(true);
   });
 });

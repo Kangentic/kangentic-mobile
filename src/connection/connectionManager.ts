@@ -751,9 +751,10 @@ function reassertForegroundServiceState(): void {
 }
 
 function onAppStateChange(status: AppStateStatus): void {
-  // Before the branches: a stop the reconciler still owes has to be retried on
-  // every transition, including the ones that go on to stop the keepalive
-  // anyway. An owed stop means the native service may still be up.
+  // Before the branches, and that order is load-bearing. A stop the reconciler
+  // still owes has to be retried on every transition, and the 'active' branch
+  // below cannot do it: stopBackgroundKeepalive returns early when the keepalive
+  // is already inactive, which is exactly the state a failed stop leaves behind.
   reassertForegroundServiceState();
   if (status === 'active') {
     stopBackgroundKeepalive();

@@ -72,6 +72,15 @@ export function registerForegroundServiceRunner(): void {
         // stranded one quietly changes the timer behaviour of the whole app.
         // Release it before parking the new one.
         resolveServiceRunner?.();
+        if (!desiredRunning) {
+          // This invocation belongs to a service nothing asked for: Android
+          // restarted one after a process death, and the boot sweep is about to
+          // stop it (or already has). Parking here would strand the headless
+          // task against a service that no longer exists.
+          resolve();
+          resolveServiceRunner = null;
+          return;
+        }
         resolveServiceRunner = resolve;
       }),
   );
@@ -96,6 +105,14 @@ export function setConnectedForegroundServiceDesired(running: boolean): void {
  * The point is the abnormal case: a stop that failed every attempt stays owed,
  * and this is how it gets retried from a wake source that does not depend on a
  * JS timer (an inbound relay frame, an AppState transition).
+ *
+ * KNOWN GAP, stated rather than papered over. Hitting the ceiling closes the
+ * channel, so after a failed stop there are no more rekeys and the only wake
+ * source left is the user returning to the app. If that never happens the stop
+ * stays owed until the next process start, where stopOrphanedForegroundServiceAtBoot
+ * catches it. Closing that properly needs a native alarm (an AlarmManager-backed
+ * notifee trigger), which is deliberately not built until a device probe shows
+ * it is needed.
  */
 export function reassertConnectedForegroundService(): void {
   if (!stopFailed) return;
@@ -111,7 +128,10 @@ export function reassertConnectedForegroundService(): void {
  * issuing it once costs nothing when there is no service to stop.
  */
 export function stopOrphanedForegroundServiceAtBoot(): void {
-  void notifee.stopForegroundService().catch(() => {
+  // Through the same stop the reconciler uses, not a bare native call: that one
+  // also releases a parked runner resolver, so the headless task cannot outlive
+  // the service it belongs to.
+  void stopConnectedForegroundService().catch(() => {
     // Nothing was running, or notifee is not ready yet. Either way the normal
     // keepalive path owns the service from here.
   });
