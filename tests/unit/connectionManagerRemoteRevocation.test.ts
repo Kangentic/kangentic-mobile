@@ -26,6 +26,11 @@ import type { StubSessionInitiator } from '@/devsupport/stubDesktopPeer';
 import { useSettingsStore } from '@/state/settingsStore';
 import { useChannelStore } from '@/state/channelStore';
 import { useBoardStore } from '@/state/boardStore';
+import {
+  consumePendingNavigation,
+  getPendingNavigation,
+  subscribePendingNavigation,
+} from '@/navigation/pendingNavigation';
 import { flushMicrotasks, waitUntil } from '../helpers/async';
 
 const mockRunBootstrap = vi.hoisted(() => vi.fn<() => Promise<void>>());
@@ -115,6 +120,8 @@ describe('connectionManager remote revocation', () => {
     mockRouter.canDismiss.mockClear();
     mockRouter.dismissAll.mockClear();
     mockRouter.navigate.mockClear();
+    // The pending-navigation slot is module state and outlives a test.
+    consumePendingNavigation();
   });
 
   afterEach(async () => {
@@ -128,7 +135,7 @@ describe('connectionManager remote revocation', () => {
     useBoardStore.getState().reset();
   });
 
-  it('an inbound Final clears the pairing, wipes content, and navigates home without echoing a goodbye', async () => {
+  it('an inbound Final clears the pairing, wipes content, and publishes a reset home without echoing a goodbye', async () => {
     const { startConnectionLifecycle } = await import('@/connection/connectionManager');
     const sendFinalFrameSpy = vi.spyOn(SessionManager.prototype, 'sendFinalFrame');
 
@@ -142,7 +149,7 @@ describe('connectionManager remote revocation', () => {
 
     const stub = mockDesktopSeam.stub as StubSessionInitiator;
     stub.sendFinalFrame();
-    await waitUntil(() => mockRouter.navigate.mock.calls.length === 1);
+    await waitUntil(() => getPendingNavigation() !== null);
     unsubscribe();
 
     expect(pairedStateHistory).toContain('unpaired');
@@ -152,17 +159,26 @@ describe('connectionManager remote revocation', () => {
     );
     expect(useBoardStore.getState().hasHydratedSnapshot).toBe(false);
     expect(mockClearPushRegistration).toHaveBeenCalledTimes(1);
-    expect(mockRouter.dismissAll).toHaveBeenCalledTimes(1);
-    expect(mockRouter.navigate).toHaveBeenCalledWith('/');
+    expect(getPendingNavigation()).toEqual({ kind: 'reset-to-root' });
     // 'stay-silent' teardown: the desktop that revoked us gets no goodbye.
     expect(sendFinalFrameSpy).not.toHaveBeenCalled();
   });
 
-  it('still clears the pairing when navigation throws (background revoke)', async () => {
+  /**
+   * This replaces a test called "still clears the pairing when navigation
+   * throws (background revoke)", which mocked router.navigate to throw and
+   * asserted the teardown survived. That encoded the wrong model: the handler
+   * used to call `router.navigate('/')` behind a try/catch whose comment named
+   * the background-revoke case, and that catch could never fire, because
+   * `navigate` only ENQUEUES - the throw happens later, inside expo-router's
+   * drain effect, on a different stack, above every error boundary. Mocking
+   * navigate to throw synchronously tested a situation that does not occur.
+   *
+   * The real invariant is that this module never touches the router at all.
+   * See .claude/rules/imperative-router-inside-react.md.
+   */
+  it('never calls the router itself, whatever the revocation timing', async () => {
     const { startConnectionLifecycle } = await import('@/connection/connectionManager');
-    mockRouter.navigate.mockImplementationOnce(() => {
-      throw new Error('navigator not mounted');
-    });
 
     startConnectionLifecycle();
     await waitUntil(() => useChannelStore.getState().established);
@@ -170,26 +186,15 @@ describe('connectionManager remote revocation', () => {
     const stub = mockDesktopSeam.stub as StubSessionInitiator;
     stub.sendFinalFrame();
     await waitUntil(() => mockDeleteItemAsync.mock.calls.length >= 3);
-    // Let the reopen settle so a swallowed throw cannot hide behind timing.
+    // Let the reopen settle so a late router call cannot hide behind timing.
     await waitUntil(() => useChannelStore.getState().established);
 
     expect(mockDeleteItemAsync).toHaveBeenCalledTimes(3);
     expect(mockClearPushRegistration).toHaveBeenCalledTimes(1);
-  });
-
-  it('skips dismissAll and still navigates home when there is nothing to dismiss', async () => {
-    const { startConnectionLifecycle } = await import('@/connection/connectionManager');
-    mockRouter.canDismiss.mockReturnValueOnce(false);
-
-    startConnectionLifecycle();
-    await waitUntil(() => useChannelStore.getState().established);
-
-    const stub = mockDesktopSeam.stub as StubSessionInitiator;
-    stub.sendFinalFrame();
-    await waitUntil(() => mockRouter.navigate.mock.calls.length === 1);
-
+    expect(mockRouter.navigate).not.toHaveBeenCalled();
+    expect(mockRouter.push).not.toHaveBeenCalled();
     expect(mockRouter.dismissAll).not.toHaveBeenCalled();
-    expect(mockRouter.navigate).toHaveBeenCalledWith('/');
+    expect(mockRouter.canDismiss).not.toHaveBeenCalled();
   });
 
   it('a Final racing a local teardown does not revoke anything', async () => {
@@ -209,12 +214,20 @@ describe('connectionManager remote revocation', () => {
     await flushMicrotasks();
 
     expect(mockDeleteItemAsync).not.toHaveBeenCalled();
-    expect(mockRouter.navigate).not.toHaveBeenCalled();
+    expect(getPendingNavigation()).toBeNull();
     expect(useChannelStore.getState().pairedState).not.toBe('unpaired');
   });
 
   it('a second Final does not double-run the teardown', async () => {
     const { startConnectionLifecycle } = await import('@/connection/connectionManager');
+
+    // The slot holds only the latest value, so counting publishes needs the
+    // subscription: two resets in a row would overwrite to the same value and
+    // read as one.
+    let publishCount = 0;
+    const unsubscribe = subscribePendingNavigation(() => {
+      if (getPendingNavigation() !== null) publishCount += 1;
+    });
 
     startConnectionLifecycle();
     await waitUntil(() => useChannelStore.getState().established);
@@ -222,12 +235,12 @@ describe('connectionManager remote revocation', () => {
     const stub = mockDesktopSeam.stub as StubSessionInitiator;
     stub.sendFinalFrame();
     stub.sendFinalFrame();
-    await waitUntil(() => mockRouter.navigate.mock.calls.length >= 1);
+    await waitUntil(() => publishCount >= 1);
     // Give a straggling second handler every chance to (wrongly) run.
     await waitUntil(() => useChannelStore.getState().established);
+    unsubscribe();
 
-    expect(mockRouter.navigate).toHaveBeenCalledTimes(1);
-    expect(mockRouter.dismissAll).toHaveBeenCalledTimes(1);
+    expect(publishCount).toBe(1);
     // Exactly one anchor clear: three trust.* keys, once each.
     expect(mockDeleteItemAsync).toHaveBeenCalledTimes(3);
     expect(mockClearPushRegistration).toHaveBeenCalledTimes(1);

@@ -174,14 +174,14 @@ async function handleDesktopRevocation(controller: ChannelController): Promise<v
       // A failed Keychain delete leaves a stale anchor behind; the desktop
       // no longer answers it, and Devices still offers a manual unpair.
     }
-    try {
-      const { router } = await import('expo-router');
-      if (router.canDismiss()) router.dismissAll();
-      router.navigate('/');
-    } catch {
-      // Navigator not mounted (a background revoke); the next launch renders
-      // the unpaired home on its own.
-    }
+    // Published rather than navigated. This used to call
+    // `router.navigate('/')` here behind a try/catch whose comment read
+    // "navigator not mounted (a background revoke)" - the one case it could
+    // not actually handle. `navigate` only enqueues; the throw happens later
+    // inside expo-router's drain effect, on a different stack, above every
+    // error boundary. See src/navigation/pendingNavigation.ts.
+    const { publishPendingNavigation } = await import('@/navigation/pendingNavigation');
+    publishPendingNavigation({ kind: 'reset-to-root' });
   } finally {
     remoteRevocationInFlight = false;
   }

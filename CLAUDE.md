@@ -101,6 +101,11 @@ src/
                   #   the actions API screens call (accountless-core scoped), the
                   #   mockDesktop peer (dev rig via EXPO_PUBLIC_KANGENTIC_MOCK, and - since the
                   #   reviewer demo - also in PRODUCTION via a demo trust anchor, see src/demo/)
+  navigation/     # The pending-navigation slot + PendingNavigationRunner: the ONLY place that
+                  #   performs a navigation published from outside React. expo-router's
+                  #   imperative router enqueues rather than navigates, and the queue drains in
+                  #   an effect that throws fatally if no navigator has mounted - see
+                  #   .claude/rules/imperative-router-inside-react.md
   conversation/   # Pure transcript-cell flattener, prompt keystrokes, pending-prompt summary
   demo/           # The permanent reviewer/demo pairing: fixed non-expiring code, in-process
                   #   IKpsk0 ceremony against StubPairingResponder, the isDemoAnchor
@@ -452,6 +457,12 @@ names its enforcement (live now, or planned where mechanical coverage does not e
   (`src/components/`, `src/screens/`).
 - `ui-copy-brevity.md` - labels name the action, context names the object; one-line
   descriptions; a11y labels exempt (`src/screens/`, `src/components/`).
+- `imperative-router-inside-react.md` - expo-router's imperative `router` is only called from
+  inside the mounted navigator; everything else publishes to `src/navigation/pendingNavigation.ts`.
+  `router.push` merely ENQUEUES, and the queue drains in a React effect that throws fatally above
+  every error boundary when no navigator has mounted (the iOS 0.6.3 build 13 cold-start crash); a
+  try/catch at the call site cannot catch it, and an `isReady()` guard in the runner is a bug
+  (`src/navigation/`, `src/notifications/`, `src/connection/`, `src/channel/`, `src/demo/`, `app/`).
 - `e2e-maestro-runs.md` - Maestro through the CLI, one rig mode, testID selectors, the dev-client
   constraints (`.maestro/`, `scripts/stubDesktopPeer.mjs`, `scripts/dev.mjs`).
 - `performance-claims-are-measured.md` - release build or it is not known; label measured vs read

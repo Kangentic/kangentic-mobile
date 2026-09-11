@@ -1,6 +1,7 @@
 /**
- * Pins two real defects found in `eslint.config.mjs` on this branch, both
- * already fixed in the working tree. Nothing else in the repo checks that a
+ * Pins two real defects found in `eslint.config.mjs` on this branch (both
+ * already fixed in the working tree), plus the three-way split of the
+ * imperative-router ban described below. Nothing else in the repo checks that a
  * lint rule actually FIRES where it is supposed to - `tsc` cannot see a
  * misconfigured ESLint rule, and a config that "looks correct" but silently
  * stops matching is exactly the failure mode here. So this test drives real
@@ -114,6 +115,99 @@ describe('eslint.config.mjs: no-restricted-imports ordering (defect A)', () => {
       const fired = await ruleFired(
         'src/lib/haptics.ts',
         "import * as Haptics from 'expo-haptics';\n",
+        NO_RESTRICTED_IMPORTS,
+      );
+      expect(fired).toBe(false);
+    },
+    15000,
+  );
+});
+
+describe('eslint.config.mjs: expo-router router import confinement (imperative-router-inside-react.md)', () => {
+  it(
+    'bans the router named import from src/notifications - tapRouter.ts is where the crash came from',
+    async () => {
+      const fired = await ruleFired(
+        'src/notifications/probe.ts',
+        "import { router } from 'expo-router';\n",
+        NO_RESTRICTED_IMPORTS,
+      );
+      expect(fired).toBe(true);
+    },
+    15000,
+  );
+
+  it(
+    'bans the router named import from src/connection, which is covered by the broad haptics-plus-router entry rather than the crypto/push directory entry',
+    async () => {
+      const fired = await ruleFired(
+        'src/connection/probe.ts',
+        "import { router } from 'expo-router';\n",
+        NO_RESTRICTED_IMPORTS,
+      );
+      expect(fired).toBe(true);
+    },
+    15000,
+  );
+
+  it(
+    'does not ban the router named import from src/navigation, the one place a published navigation is performed',
+    async () => {
+      const fired = await ruleFired(
+        'src/navigation/probe.ts',
+        "import { router } from 'expo-router';\n",
+        NO_RESTRICTED_IMPORTS,
+      );
+      expect(fired).toBe(false);
+    },
+    15000,
+  );
+
+  it(
+    'does not ban the router named import from src/screens, which renders inside the mounted navigator',
+    async () => {
+      const fired = await ruleFired(
+        'src/screens/probe.ts',
+        "import { router } from 'expo-router';\n",
+        NO_RESTRICTED_IMPORTS,
+      );
+      expect(fired).toBe(false);
+    },
+    15000,
+  );
+
+  it(
+    'still bans a direct expo-haptics import from src/navigation - the allow entry must restate the haptics ban, not drop it',
+    async () => {
+      const fired = await ruleFired(
+        'src/navigation/probe.ts',
+        "import * as Haptics from 'expo-haptics';\n",
+        NO_RESTRICTED_IMPORTS,
+      );
+      expect(fired).toBe(true);
+    },
+    15000,
+  );
+
+  it(
+    'still bans an observability import from src/notifications - the router ban must have been added there without dropping the Sentry ban',
+    async () => {
+      const fired = await ruleFired(
+        'src/notifications/probe.ts',
+        "import { reportCaughtError } from '@/observability/crashReporting';\n",
+        NO_RESTRICTED_IMPORTS,
+      );
+      expect(fired).toBe(true);
+    },
+    15000,
+  );
+
+  it(
+    'does not ban a non-router expo-router import, pinning that importNames: [\'router\'] is the whole precision of the rule',
+    async () => {
+      const fired = await ruleFired(
+        'src/notifications/probe.ts',
+        "import { Stack } from 'expo-router';\n",
         NO_RESTRICTED_IMPORTS,
       );
       expect(fired).toBe(false);

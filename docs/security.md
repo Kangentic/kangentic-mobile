@@ -403,10 +403,15 @@ configured, and `.claude/rules/crash-reporting-scope.md` is the rule that keeps 
   repository never calls `Sentry.init()`, starts no native SDK, and sends nothing. This is deliberate twice over: it keeps self-hosted builds free of any
   Kangentic-operated service, and it stops a fork's crashes consuming this project's free-tier
   quota.
-- **Why we accept it:** the alternative is shipping blind. The app has no logger, no error
-  boundary, and no other diagnostics, so before this a production crash was simply invisible.
-  Store dashboards (Play Console, App Store Connect) report crash counts but no JavaScript
-  frames, which for a React Native app is most of the story.
+- **Why we accept it:** the alternative is shipping blind. The app has no logger and no other
+  diagnostics, so before this a production crash was simply invisible. Store dashboards (Play
+  Console, App Store Connect) report crash counts but no JavaScript frames, which for a React
+  Native app is most of the story. The app does now have one error boundary
+  (`src/screens/AppErrorBoundaryScreen.tsx`, wired as the root `ErrorBoundary` in
+  `app/_layout.tsx`), and that makes reporting MORE load-bearing rather than less: React hands a
+  caught error to the boundary instead of to `ErrorUtils`, so the global handler never sees it.
+  `reportCaughtError` in `src/observability/crashReporting.ts` is the capture path that stops a
+  boundary trading a visible crash for an invisible one.
 - **Degradation:** entirely optional and entirely absent when unconfigured. There is no runtime
   dependency on it, no user-facing behaviour attached to it, and no failure mode if Sentry is
   unreachable.

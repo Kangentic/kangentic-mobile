@@ -1,18 +1,26 @@
 /**
  * Notification tap routing, and specifically the iOS half.
  *
- * iOS has no Notification Service Extension yet, so nothing decrypts before the
- * OS renders the alert and the tapped notification carries only the sealed
- * blob. The router decrypts it on tap - which is what keeps taskId out of the
- * OS-visible payload, per e2e-notification-privacy.md. The failure path matters
- * as much as the happy one: a blob that will not decrypt must route NOWHERE
- * rather than guess, leaving the user on Home.
+ * The iOS Notification Service Extension rewrites a push's title and body
+ * before the OS renders it, but deliberately never touches `userInfo`, so the
+ * tapped notification still carries only the sealed blob. The router decrypts
+ * it on tap - which is what keeps taskId out of the OS-visible payload, per
+ * e2e-notification-privacy.md. The failure path matters as much as the happy
+ * one: a blob that will not decrypt must route NOWHERE rather than guess,
+ * leaving the user on Home.
+ *
+ * This module publishes a resolved target to the shared pending-navigation slot
+ * and NEVER navigates; PendingNavigationRunner performs the navigation from
+ * inside the mounted navigator. The assertions below are written against that
+ * slot, and one of them pins the negative directly (see 'never navigates from
+ * module scope'), because calling expo-router's imperative router from
+ * bundle-entry scope is what crashed iOS on a cold-start tap in 0.6.3 build 13.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushMicrotasks } from '../helpers/async';
 
 const platformMock = vi.hoisted(() => ({ OS: 'ios' as 'android' | 'ios' }));
-const routerMock = vi.hoisted(() => ({ push: vi.fn() }));
+const routerMock = vi.hoisted(() => ({ push: vi.fn(), navigate: vi.fn(), canDismiss: vi.fn(), dismissAll: vi.fn() }));
 const notifeeMock = vi.hoisted(() => ({ onForegroundEvent: vi.fn(), onBackgroundEvent: vi.fn() }));
 const expoNotificationsMock = vi.hoisted(() => ({
   addNotificationResponseReceivedListener: vi.fn(),
@@ -30,6 +38,9 @@ vi.mock('expo-secure-store', () => ({
 }));
 
 vi.mock('react-native', () => ({ Platform: platformMock }));
+// tapRouter must NOT import expo-router any more. The mock stays so the
+// 'never navigates from module scope' case can prove that as a negative
+// rather than merely asserting the slot was written.
 vi.mock('expo-router', () => ({ router: routerMock }));
 vi.mock('@notifee/react-native', () => ({
   default: notifeeMock,
@@ -42,9 +53,37 @@ vi.mock('@/notifications/pushDecrypt', async () => {
 });
 
 type TapRouterModule = typeof import('@/notifications/tapRouter');
+type PendingNavigationModule = typeof import('@/navigation/pendingNavigation');
+type PendingNavigation = NonNullable<ReturnType<PendingNavigationModule['getPendingNavigation']>>;
 
-async function loadModule(): Promise<TapRouterModule> {
-  return import('@/notifications/tapRouter');
+/**
+ * Both modules are loaded together and AFTER `vi.resetModules()`, so they share
+ * one fresh module registry - tapRouter's own import of the slot resolves to
+ * the same instance this returns. Loading them in separate turns would hand the
+ * test a different slot than the one under test.
+ */
+async function loadModules(): Promise<{
+  tapRouter: TapRouterModule;
+  pendingNavigation: PendingNavigationModule;
+}> {
+  const tapRouter = await import('@/notifications/tapRouter');
+  const pendingNavigation = await import('@/navigation/pendingNavigation');
+  return { tapRouter, pendingNavigation };
+}
+
+/**
+ * Every published navigation, in order. The slot holds only the latest value,
+ * so counting publishes needs the subscription rather than a read - which is
+ * also the mechanism the React consumer depends on, so a broken notify loop
+ * fails here rather than only on device.
+ */
+function recordPublished(pendingNavigation: PendingNavigationModule): PendingNavigation[] {
+  const published: PendingNavigation[] = [];
+  pendingNavigation.subscribePendingNavigation(() => {
+    const pending = pendingNavigation.getPendingNavigation();
+    if (pending) published.push(pending);
+  });
+  return published;
 }
 
 /**
@@ -65,11 +104,19 @@ const DECRYPTED = {
   data: { taskId: 'task-1', projectId: 'project-1', sessionId: 'sess-1' },
 };
 
+const DECRYPTED_TARGET = {
+  kind: 'open-task',
+  taskId: 'task-1',
+  projectId: 'project-1',
+  sessionId: 'sess-1',
+};
+
 describe('tapRouter - iOS push responses', () => {
   beforeEach(() => {
     vi.resetModules();
     platformMock.OS = 'ios';
     routerMock.push.mockClear();
+    routerMock.navigate.mockClear();
     notifeeMock.onForegroundEvent.mockClear();
     notifeeMock.onBackgroundEvent.mockClear();
     expoNotificationsMock.addNotificationResponseReceivedListener.mockClear();
@@ -79,52 +126,99 @@ describe('tapRouter - iOS push responses', () => {
     decryptPushBlobMock.mockResolvedValue(DECRYPTED);
   });
 
-  it('decrypts the tapped blob and opens the task in chat mode', async () => {
-    const { routeFromPushResponse } = await loadModule();
+  it('decrypts the tapped blob and publishes the task open in chat mode', async () => {
+    const { tapRouter, pendingNavigation } = await loadModules();
+    const published = recordPublished(pendingNavigation);
 
-    await routeFromPushResponse(pushResponse({ blob: 'sealed-blob' }));
+    await tapRouter.routeFromPushResponse(pushResponse({ blob: 'sealed-blob' }));
 
     expect(decryptPushBlobMock).toHaveBeenCalledWith('sealed-blob');
-    expect(routerMock.push).toHaveBeenCalledWith({
-      pathname: '/task/[taskId]',
-      params: { taskId: 'task-1', projectId: 'project-1', sessionId: 'sess-1', mode: 'chat' },
-    });
+    expect(published).toEqual([DECRYPTED_TARGET]);
+    expect(pendingNavigation.getPendingNavigation()).toEqual(DECRYPTED_TARGET);
+  });
+
+  /**
+   * THE REGRESSION THIS FILE EXISTS FOR. `router.push` does not navigate, it
+   * appends to expo-router's routing queue; the queue is drained by a React
+   * effect that throws 'Attempted to navigate before mounting the Root Layout
+   * component' when no navigator has mounted. On a native cold start that
+   * window is real, the effect sits above every error boundary, and the throw
+   * aborts the process - which is the 0.6.3 build 13 TestFlight crash. A
+   * try/catch cannot help, because push itself never throws.
+   *
+   * So the invariant is structural: nothing in this module may navigate.
+   */
+  it('never navigates from module scope, publishing a pending open instead', async () => {
+    const { tapRouter, pendingNavigation } = await loadModules();
+
+    await tapRouter.routeFromPushResponse(pushResponse({ blob: 'sealed-blob' }));
+
+    expect(routerMock.push).not.toHaveBeenCalled();
+    expect(routerMock.navigate).not.toHaveBeenCalled();
+    expect(pendingNavigation.getPendingNavigation()).toEqual(DECRYPTED_TARGET);
+  });
+
+  /**
+   * The snapshot feeds useSyncExternalStore, which re-renders forever if the
+   * getter allocates. Identity, not deep equality, is the assertion.
+   */
+  it('returns a stable snapshot reference between publishes', async () => {
+    const { tapRouter, pendingNavigation } = await loadModules();
+
+    await tapRouter.routeFromPushResponse(pushResponse({ blob: 'sealed-blob' }));
+
+    expect(pendingNavigation.getPendingNavigation()).toBe(pendingNavigation.getPendingNavigation());
+  });
+
+  it('clears the slot when consumed, so one tap cannot route twice', async () => {
+    const { tapRouter, pendingNavigation } = await loadModules();
+
+    await tapRouter.routeFromPushResponse(pushResponse({ blob: 'sealed-blob' }));
+
+    expect(pendingNavigation.consumePendingNavigation()).toEqual(DECRYPTED_TARGET);
+    expect(pendingNavigation.getPendingNavigation()).toBeNull();
+    expect(pendingNavigation.consumePendingNavigation()).toBeNull();
   });
 
   /** Expo wraps the data payload as a JSON string on some delivery paths. */
   it('reads the blob out of the JSON-wrapped payload shape too', async () => {
-    const { routeFromPushResponse } = await loadModule();
+    const { tapRouter, pendingNavigation } = await loadModules();
+    const published = recordPublished(pendingNavigation);
 
-    await routeFromPushResponse(pushResponse({ body: JSON.stringify({ blob: 'wrapped-blob' }) }));
+    await tapRouter.routeFromPushResponse(pushResponse({ body: JSON.stringify({ blob: 'wrapped-blob' }) }));
 
     expect(decryptPushBlobMock).toHaveBeenCalledWith('wrapped-blob');
-    expect(routerMock.push).toHaveBeenCalledTimes(1);
+    expect(published).toHaveLength(1);
   });
 
   it('routes nowhere when the blob cannot be decrypted', async () => {
     decryptPushBlobMock.mockResolvedValue(null);
-    const { routeFromPushResponse } = await loadModule();
+    const { tapRouter, pendingNavigation } = await loadModules();
+    const published = recordPublished(pendingNavigation);
 
-    await routeFromPushResponse(pushResponse({ blob: 'tampered-blob' }));
+    await tapRouter.routeFromPushResponse(pushResponse({ blob: 'tampered-blob' }));
 
-    expect(routerMock.push).not.toHaveBeenCalled();
+    expect(published).toHaveLength(0);
+    expect(pendingNavigation.getPendingNavigation()).toBeNull();
   });
 
   it('routes nowhere when the payload carries no blob at all', async () => {
-    const { routeFromPushResponse } = await loadModule();
+    const { tapRouter, pendingNavigation } = await loadModules();
+    const published = recordPublished(pendingNavigation);
 
-    await routeFromPushResponse(pushResponse({ someOtherKey: 'value' }));
+    await tapRouter.routeFromPushResponse(pushResponse({ someOtherKey: 'value' }));
 
     expect(decryptPushBlobMock).not.toHaveBeenCalled();
-    expect(routerMock.push).not.toHaveBeenCalled();
+    expect(published).toHaveLength(0);
   });
 
   it('routes nowhere for a null response (no cold-start tap)', async () => {
-    const { routeFromPushResponse } = await loadModule();
+    const { tapRouter, pendingNavigation } = await loadModules();
+    const published = recordPublished(pendingNavigation);
 
-    await routeFromPushResponse(null);
+    await tapRouter.routeFromPushResponse(null);
 
-    expect(routerMock.push).not.toHaveBeenCalled();
+    expect(published).toHaveLength(0);
   });
 
   /**
@@ -135,12 +229,13 @@ describe('tapRouter - iOS push responses', () => {
    * user needs two back presses to leave it.
    */
   it('routes one tap once when both deliveries carry the same notification identifier', async () => {
-    const { routeFromPushResponse } = await loadModule();
+    const { tapRouter, pendingNavigation } = await loadModules();
+    const published = recordPublished(pendingNavigation);
 
-    await routeFromPushResponse(pushResponse({ blob: 'sealed-blob' }, 'notification-1'));
-    await routeFromPushResponse(pushResponse({ blob: 'sealed-blob' }, 'notification-1'));
+    await tapRouter.routeFromPushResponse(pushResponse({ blob: 'sealed-blob' }, 'notification-1'));
+    await tapRouter.routeFromPushResponse(pushResponse({ blob: 'sealed-blob' }, 'notification-1'));
 
-    expect(routerMock.push).toHaveBeenCalledTimes(1);
+    expect(published).toHaveLength(1);
     expect(decryptPushBlobMock).toHaveBeenCalledTimes(1);
   });
 
@@ -149,12 +244,13 @@ describe('tapRouter - iOS push responses', () => {
    * different tap, which is the failure mode that would silently break routing.
    */
   it('still routes a second tap carrying a different notification identifier', async () => {
-    const { routeFromPushResponse } = await loadModule();
+    const { tapRouter, pendingNavigation } = await loadModules();
+    const published = recordPublished(pendingNavigation);
 
-    await routeFromPushResponse(pushResponse({ blob: 'sealed-blob' }, 'notification-1'));
-    await routeFromPushResponse(pushResponse({ blob: 'sealed-blob' }, 'notification-2'));
+    await tapRouter.routeFromPushResponse(pushResponse({ blob: 'sealed-blob' }, 'notification-1'));
+    await tapRouter.routeFromPushResponse(pushResponse({ blob: 'sealed-blob' }, 'notification-2'));
 
-    expect(routerMock.push).toHaveBeenCalledTimes(2);
+    expect(published).toHaveLength(2);
   });
 
   /**
@@ -167,12 +263,13 @@ describe('tapRouter - iOS push responses', () => {
    * second call and silently swallow it.
    */
   it('routes every tap that omits a notification identifier, never deduping them against each other', async () => {
-    const { routeFromPushResponse } = await loadModule();
+    const { tapRouter, pendingNavigation } = await loadModules();
+    const published = recordPublished(pendingNavigation);
 
-    await routeFromPushResponse(pushResponse({ blob: 'sealed-blob' }));
-    await routeFromPushResponse(pushResponse({ blob: 'sealed-blob' }));
+    await tapRouter.routeFromPushResponse(pushResponse({ blob: 'sealed-blob' }));
+    await tapRouter.routeFromPushResponse(pushResponse({ blob: 'sealed-blob' }));
 
-    expect(routerMock.push).toHaveBeenCalledTimes(2);
+    expect(published).toHaveLength(2);
   });
 
   /**
@@ -182,9 +279,9 @@ describe('tapRouter - iOS push responses', () => {
    * displayed - which on iOS is none of them.
    */
   it('registers both the warm listener and the cold-start read, and no notifee handlers', async () => {
-    const { registerNotificationTapHandlers } = await loadModule();
+    const { tapRouter } = await loadModules();
 
-    registerNotificationTapHandlers();
+    tapRouter.registerNotificationTapHandlers();
 
     expect(expoNotificationsMock.addNotificationResponseReceivedListener).toHaveBeenCalledTimes(1);
     expect(expoNotificationsMock.getLastNotificationResponseAsync).toHaveBeenCalledTimes(1);
@@ -203,16 +300,17 @@ describe('tapRouter - iOS push responses', () => {
     expoNotificationsMock.getLastNotificationResponseAsync.mockResolvedValue(
       pushResponse({ blob: 'sealed-blob' }, 'cold-start-notification'),
     );
-    const { registerNotificationTapHandlers } = await loadModule();
+    const { tapRouter, pendingNavigation } = await loadModules();
+    const published = recordPublished(pendingNavigation);
 
-    registerNotificationTapHandlers();
-    await vi.waitFor(() => expect(routerMock.push).toHaveBeenCalledTimes(1));
+    tapRouter.registerNotificationTapHandlers();
+    await vi.waitFor(() => expect(published).toHaveLength(1));
 
     expect(decryptPushBlobMock).toHaveBeenCalledWith('sealed-blob');
-    expect(routerMock.push).toHaveBeenCalledWith({
-      pathname: '/task/[taskId]',
-      params: { taskId: 'task-1', projectId: 'project-1', sessionId: 'sess-1', mode: 'chat' },
-    });
+    expect(published[0]).toEqual(DECRYPTED_TARGET);
+    // Even the cold-start path, the one that runs earliest of all, must not
+    // reach the router itself.
+    expect(routerMock.push).not.toHaveBeenCalled();
   });
 
   /**
@@ -224,20 +322,21 @@ describe('tapRouter - iOS push responses', () => {
    */
   it('swallows a rejected cold-start read without throwing or routing', async () => {
     expoNotificationsMock.getLastNotificationResponseAsync.mockRejectedValue(new Error('module unavailable'));
-    const { registerNotificationTapHandlers } = await loadModule();
+    const { tapRouter, pendingNavigation } = await loadModules();
+    const published = recordPublished(pendingNavigation);
 
-    expect(() => registerNotificationTapHandlers()).not.toThrow();
+    expect(() => tapRouter.registerNotificationTapHandlers()).not.toThrow();
     // Give the rejected promise's .catch() a turn to run.
     await flushMicrotasks();
 
-    expect(routerMock.push).not.toHaveBeenCalled();
+    expect(published).toHaveLength(0);
   });
 
   it('registers the notifee handlers on Android instead, and never the expo listener', async () => {
     platformMock.OS = 'android';
-    const { registerNotificationTapHandlers } = await loadModule();
+    const { tapRouter } = await loadModules();
 
-    registerNotificationTapHandlers();
+    tapRouter.registerNotificationTapHandlers();
 
     expect(notifeeMock.onForegroundEvent).toHaveBeenCalledTimes(1);
     expect(notifeeMock.onBackgroundEvent).toHaveBeenCalledTimes(1);
@@ -245,10 +344,10 @@ describe('tapRouter - iOS push responses', () => {
   });
 
   it('registers once however many times it is called', async () => {
-    const { registerNotificationTapHandlers } = await loadModule();
+    const { tapRouter } = await loadModules();
 
-    registerNotificationTapHandlers();
-    registerNotificationTapHandlers();
+    tapRouter.registerNotificationTapHandlers();
+    tapRouter.registerNotificationTapHandlers();
 
     expect(expoNotificationsMock.addNotificationResponseReceivedListener).toHaveBeenCalledTimes(1);
   });
@@ -259,6 +358,7 @@ describe('tapRouter - Android notifee presses', () => {
     vi.resetModules();
     platformMock.OS = 'android';
     routerMock.push.mockClear();
+    routerMock.navigate.mockClear();
     notifeeMock.onForegroundEvent.mockClear();
     notifeeMock.onBackgroundEvent.mockClear();
     decryptPushBlobMock.mockReset();
@@ -269,8 +369,9 @@ describe('tapRouter - Android notifee presses', () => {
    * are already on the notification and nothing is decrypted a second time.
    */
   it('opens the task straight from the notification data, without decrypting', async () => {
-    const { registerNotificationTapHandlers } = await loadModule();
-    registerNotificationTapHandlers();
+    const { tapRouter, pendingNavigation } = await loadModules();
+    const published = recordPublished(pendingNavigation);
+    tapRouter.registerNotificationTapHandlers();
 
     const onForegroundEvent = notifeeMock.onForegroundEvent.mock.calls[0][0] as (event: unknown) => void;
     onForegroundEvent({
@@ -279,29 +380,48 @@ describe('tapRouter - Android notifee presses', () => {
     });
 
     expect(decryptPushBlobMock).not.toHaveBeenCalled();
-    expect(routerMock.push).toHaveBeenCalledWith({
-      pathname: '/task/[taskId]',
-      params: { taskId: 'task-9', projectId: 'project-9', sessionId: 'sess-9', mode: 'chat' },
+    expect(published).toEqual([
+      { kind: 'open-task', taskId: 'task-9', projectId: 'project-9', sessionId: 'sess-9' },
+    ]);
+  });
+
+  /**
+   * Android reaches the same unmounted-navigator window on its second commit,
+   * so the no-navigation invariant is not an iOS-only concern.
+   */
+  it('never navigates from the notifee press handler either', async () => {
+    const { tapRouter } = await loadModules();
+    tapRouter.registerNotificationTapHandlers();
+
+    const onForegroundEvent = notifeeMock.onForegroundEvent.mock.calls[0][0] as (event: unknown) => void;
+    onForegroundEvent({
+      type: 1,
+      detail: { notification: { data: { taskId: 'task-9', projectId: 'project-9', sessionId: 'sess-9' } } },
     });
+
+    expect(routerMock.push).not.toHaveBeenCalled();
+    expect(routerMock.navigate).not.toHaveBeenCalled();
   });
 
   it('ignores a press carrying no taskId', async () => {
-    const { registerNotificationTapHandlers } = await loadModule();
-    registerNotificationTapHandlers();
+    const { tapRouter, pendingNavigation } = await loadModules();
+    const published = recordPublished(pendingNavigation);
+    tapRouter.registerNotificationTapHandlers();
 
     const onForegroundEvent = notifeeMock.onForegroundEvent.mock.calls[0][0] as (event: unknown) => void;
     onForegroundEvent({ type: 1, detail: { notification: { data: {} } } });
 
-    expect(routerMock.push).not.toHaveBeenCalled();
+    expect(published).toHaveLength(0);
   });
 
   it('ignores non-press events', async () => {
-    const { registerNotificationTapHandlers } = await loadModule();
-    registerNotificationTapHandlers();
+    const { tapRouter, pendingNavigation } = await loadModules();
+    const published = recordPublished(pendingNavigation);
+    tapRouter.registerNotificationTapHandlers();
 
     const onForegroundEvent = notifeeMock.onForegroundEvent.mock.calls[0][0] as (event: unknown) => void;
     onForegroundEvent({ type: 0, detail: { notification: { data: { taskId: 'task-9' } } } });
 
-    expect(routerMock.push).not.toHaveBeenCalled();
+    expect(published).toHaveLength(0);
   });
 });
