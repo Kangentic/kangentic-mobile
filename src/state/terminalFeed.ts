@@ -30,10 +30,36 @@ interface TerminalRing {
   totalBytes: number;
   /** The PTY grid the buffered bytes are laid out for; null until the desktop reports one (or never, pre-0.4.0). */
   dims: TerminalDimensionsWire | null;
-  listeners: Set<(event: TerminalFeedEvent) => void>;
 }
 
 const ringsBySessionId = new Map<string, TerminalRing>();
+
+type TerminalFeedListener = (event: TerminalFeedEvent) => void;
+
+/**
+ * Listeners live OUTSIDE the ring, and deliberately outlive it.
+ *
+ * Retention owns the BUFFER; a subscriber owns its LISTENER. Keeping the two
+ * together made subscribe order load-bearing, and React runs child effects
+ * before parent effects in the same commit: on a session swap the pane
+ * resubscribed to the successor before SessionScreen's effect had retained
+ * its ring, subscribeChunks silently returned a no-op, and every later byte
+ * landed in a ring with zero listeners. The terminal stayed black until an
+ * unrelated re-render (a theme or clean-feed flip) happened to re-run the
+ * effect, which is why it read as "can happen" rather than "always".
+ *
+ * With the sets keyed on sessionId instead, attaching before the ring exists
+ * is ordinary: the seed that arrives once the ring is retained reaches the
+ * listener that was already waiting for it.
+ */
+const listenersBySessionId = new Map<string, Set<TerminalFeedListener>>();
+
+/** Copies the set before iterating: a listener may unsubscribe from inside its own callback. */
+function emit(sessionId: string, event: TerminalFeedEvent): void {
+  const listeners = listenersBySessionId.get(sessionId);
+  if (!listeners) return;
+  for (const listener of [...listeners]) listener(event);
+}
 
 function evictPastCapacity(ring: TerminalRing): void {
   while (ring.totalBytes > TERMINAL_RING_CAPACITY_BYTES && ring.chunks.length > 1) {
@@ -45,10 +71,11 @@ function evictPastCapacity(ring: TerminalRing): void {
 
 export function retainTerminal(sessionId: string): void {
   if (!ringsBySessionId.has(sessionId)) {
-    ringsBySessionId.set(sessionId, { chunks: [], totalBytes: 0, dims: null, listeners: new Set() });
+    ringsBySessionId.set(sessionId, { chunks: [], totalBytes: 0, dims: null });
   }
 }
 
+/** Drops the buffered bytes. Subscribers keep their listeners - see listenersBySessionId. */
 export function releaseTerminal(sessionId: string): void {
   ringsBySessionId.delete(sessionId);
 }
@@ -64,7 +91,7 @@ export function seedScrollback(sessionId: string, scrollback: string): void {
   ring.chunks = scrollback.length > 0 ? [scrollback] : [];
   ring.totalBytes = scrollback.length;
   evictPastCapacity(ring);
-  for (const listener of [...ring.listeners]) listener({ kind: 'seed', data: scrollback });
+  emit(sessionId, { kind: 'seed', data: scrollback });
 }
 
 /** No-op unless the session is retained. */
@@ -74,12 +101,24 @@ export function appendChunk(sessionId: string, data: string): void {
   ring.chunks.push(data);
   ring.totalBytes += data.length;
   evictPastCapacity(ring);
-  for (const listener of [...ring.listeners]) listener({ kind: 'chunk', data });
+  emit(sessionId, { kind: 'chunk', data });
 }
 
 export function getBufferedData(sessionId: string): string {
   const ring = ringsBySessionId.get(sessionId);
   return ring ? ring.chunks.join('') : '';
+}
+
+/**
+ * True when re-initialising the WebView from this session would paint
+ * something: the ring exists and holds bytes or a known grid. False for a
+ * successor whose first snapshot has not landed yet, where an init would
+ * paint an EMPTY grid over a perfectly good last frame.
+ */
+export function hasBufferedFrame(sessionId: string): boolean {
+  const ring = ringsBySessionId.get(sessionId);
+  if (!ring) return false;
+  return ring.chunks.length > 0 || ring.dims !== null;
 }
 
 /**
@@ -96,7 +135,7 @@ export function setTerminalDimensions(sessionId: string, dims: TerminalDimension
   }
   if (ring.dims && ring.dims.cols === dims.cols && ring.dims.rows === dims.rows) return;
   ring.dims = { cols: dims.cols, rows: dims.rows };
-  for (const listener of [...ring.listeners]) listener({ kind: 'dims', cols: dims.cols, rows: dims.rows });
+  emit(sessionId, { kind: 'dims', cols: dims.cols, rows: dims.rows });
 }
 
 /** The PTY grid the buffered bytes are laid out for, or null when unknown (pre-0.4.0 desktop, or not yet reported). */
@@ -109,13 +148,25 @@ export function getTerminalDimensions(sessionId: string): TerminalDimensionsWire
  * Live feed. The listener receives each append as a 'chunk' and each
  * scrollback re-seed as a 'seed' after it lands in the ring; call
  * getBufferedData() first for the backlog.
+ *
+ * Attaching to a session that is not retained YET is fine and deliberate: the
+ * listener simply hears nothing until a ring exists, then receives that ring's
+ * first seed. Nothing here depends on the caller's effect running after the
+ * screen's retain.
  */
-export function subscribeChunks(sessionId: string, listener: (event: TerminalFeedEvent) => void): Unsubscribe {
-  const ring = ringsBySessionId.get(sessionId);
-  if (!ring) return () => undefined;
-  ring.listeners.add(listener);
+export function subscribeChunks(sessionId: string, listener: TerminalFeedListener): Unsubscribe {
+  let listeners = listenersBySessionId.get(sessionId);
+  if (!listeners) {
+    listeners = new Set();
+    listenersBySessionId.set(sessionId, listeners);
+  }
+  listeners.add(listener);
   return () => {
-    ring.listeners.delete(listener);
+    const currentListeners = listenersBySessionId.get(sessionId);
+    if (!currentListeners) return;
+    currentListeners.delete(listener);
+    // Drop the empty set rather than leaving one per session ever watched.
+    if (currentListeners.size === 0) listenersBySessionId.delete(sessionId);
   };
 }
 
@@ -127,17 +178,31 @@ export interface TerminalFeedStats {
   listeners: number;
 }
 
-/** Per-retained-session ring stats, for the dev inspect bridge. */
+/**
+ * Per-retained-session ring stats, for the dev inspect bridge. Enumerates
+ * RINGS, so the list stays "what is buffered"; a listener attached to a
+ * session with no ring is reported by getUnbufferedListenerSessionIds().
+ */
 export function getTerminalFeedStats(): TerminalFeedStats[] {
   return [...ringsBySessionId.entries()].map(([sessionId, ring]) => ({
     sessionId,
     chunks: ring.chunks.length,
     totalBytes: ring.totalBytes,
     dims: ring.dims ? { ...ring.dims } : null,
-    listeners: ring.listeners.size,
+    listeners: listenersBySessionId.get(sessionId)?.size ?? 0,
   }));
+}
+
+/**
+ * Sessions with a live listener but no ring - normal and brief mid-swap (the
+ * pane has rebound to the successor, the screen has not retained it yet), and
+ * a leak if one persists. For the dev inspect bridge.
+ */
+export function getUnbufferedListenerSessionIds(): string[] {
+  return [...listenersBySessionId.keys()].filter((sessionId) => !ringsBySessionId.has(sessionId));
 }
 
 export function resetTerminalFeed(): void {
   ringsBySessionId.clear();
+  listenersBySessionId.clear();
 }

@@ -89,7 +89,10 @@ export function ChangesTab({ taskId, projectId, isActive }: ChangesTabProps): Re
   let body: React.JSX.Element;
   if (projectId === null) {
     body = <CenteredNote color="secondary" message="No project linked to this task" />;
-  } else if (taskDiff?.fileListStatus === 'error') {
+  } else if (fileList === null && taskDiff?.fileListStatus === 'error') {
+    // Only when there is nothing else to show. A refresh that fails over a
+    // list already on screen leaves that list up rather than blanking work the
+    // user can still read; the next successful fetch clears the status.
     body = <CenteredNote color="danger" message="Could not load changes" />;
   } else if (fileList === null) {
     body = (

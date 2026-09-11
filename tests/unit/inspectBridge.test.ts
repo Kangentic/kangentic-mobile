@@ -7,7 +7,7 @@ import { useActivityStore } from '../../src/state/activityStore';
 import { useBoardStore } from '../../src/state/boardStore';
 import { useChannelStore } from '../../src/state/channelStore';
 import { useDiffStore } from '../../src/state/diffStore';
-import { appendChunk, resetTerminalFeed, retainTerminal } from '../../src/state/terminalFeed';
+import { appendChunk, resetTerminalFeed, retainTerminal, subscribeChunks } from '../../src/state/terminalFeed';
 import { useTranscriptStore } from '../../src/state/transcriptStore';
 
 function payloadFor(kind: InspectRequestKind, argument?: string): Promise<unknown> {
@@ -57,12 +57,16 @@ describe('buildInspectPayload', () => {
     expect(JSON.stringify(payload)).not.toContain('entries":');
   });
 
-  it('reports terminal feed ring stats', async () => {
+  it('reports terminal feed ring stats, and listeners with no ring behind them', async () => {
     retainTerminal('sess-1');
     appendChunk('sess-1', 'hello world');
-    await expect(payloadFor('feed-stats')).resolves.toEqual([
-      { sessionId: 'sess-1', chunks: 1, totalBytes: 11, dims: null, listeners: 0 },
-    ]);
+    // A pane that has rebound to a successor the screen has not retained yet:
+    // normal for a moment mid-swap, a leaked subscription if it persists.
+    subscribeChunks('sess-successor', () => undefined);
+    await expect(payloadFor('feed-stats')).resolves.toEqual({
+      rings: [{ sessionId: 'sess-1', chunks: 1, totalBytes: 11, dims: null, listeners: 0 }],
+      unbufferedListeners: ['sess-successor'],
+    });
   });
 
   it('answers subscriptions from the registered manager and errors without one', async () => {

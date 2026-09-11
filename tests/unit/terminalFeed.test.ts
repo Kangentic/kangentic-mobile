@@ -7,6 +7,9 @@ import {
   appendChunk,
   getBufferedData,
   getTerminalDimensions,
+  getTerminalFeedStats,
+  getUnbufferedListenerSessionIds,
+  hasBufferedFrame,
   isTerminalRetained,
   releaseTerminal,
   resetTerminalFeed,
@@ -65,7 +68,7 @@ describe('terminalFeed', () => {
     expect(getBufferedData('sess-1')).toHaveLength(200 * 1024);
   });
 
-  it('releaseTerminal drops the ring and detaches listeners', () => {
+  it('releaseTerminal drops the ring, and nothing is buffered or delivered until it is retained again', () => {
     retainTerminal('sess-1');
     const events: TerminalFeedEvent[] = [];
     subscribeChunks('sess-1', (event) => events.push(event));
@@ -74,6 +77,84 @@ describe('terminalFeed', () => {
     appendChunk('sess-1', 'after release');
     expect(getBufferedData('sess-1')).toBe('');
     expect(events).toEqual([]);
+  });
+
+  /**
+   * THE ORDERING BUG THIS MODULE EXISTS TO NOT HAVE.
+   *
+   * React runs child effects before parent effects in the same commit, so on a
+   * session swap TerminalPane resubscribes to the successor BEFORE
+   * SessionScreen's effect retains its ring. When listeners lived on the ring,
+   * subscribeChunks found none, returned a no-op unsubscribe, and every later
+   * byte landed in a ring with zero listeners: the terminal went black and
+   * stayed black until an unrelated re-render happened to re-run the effect.
+   *
+   * Listeners are keyed on the sessionId and outlive the ring precisely so
+   * that attaching first is ordinary rather than fatal.
+   */
+  it('delivers to a listener that attached before the session was retained', () => {
+    const events: TerminalFeedEvent[] = [];
+    subscribeChunks('sess-successor', (event) => events.push(event));
+    expect(isTerminalRetained('sess-successor')).toBe(false);
+
+    retainTerminal('sess-successor');
+    seedScrollback('sess-successor', 'successor frame');
+    appendChunk('sess-successor', ' + live');
+
+    expect(events).toEqual([
+      { kind: 'seed', data: 'successor frame' },
+      { kind: 'chunk', data: ' + live' },
+    ]);
+  });
+
+  it('keeps a listener attached across a release and re-retain of the same session', () => {
+    retainTerminal('sess-1');
+    const events: TerminalFeedEvent[] = [];
+    subscribeChunks('sess-1', (event) => events.push(event));
+
+    releaseTerminal('sess-1');
+    retainTerminal('sess-1');
+    seedScrollback('sess-1', 'fresh');
+
+    expect(events).toEqual([{ kind: 'seed', data: 'fresh' }]);
+  });
+
+  it('subscribing does not retain, so an idle consumer never starts buffering bytes', () => {
+    // CompletedTaskScreen renders ConversationTab for a finished session and
+    // deliberately never calls openSessionScreen. Retaining on subscribe would
+    // buffer for it forever, and flip the isTerminalRetained gate that
+    // storeFeed and peekLastTerminalLine both read.
+    subscribeChunks('sess-archived', () => undefined);
+    expect(isTerminalRetained('sess-archived')).toBe(false);
+    expect(getTerminalFeedStats()).toEqual([]);
+    expect(getUnbufferedListenerSessionIds()).toEqual(['sess-archived']);
+  });
+
+  it('reports the listener count per retained ring', () => {
+    retainTerminal('sess-1');
+    const unsubscribeFirst = subscribeChunks('sess-1', () => undefined);
+    subscribeChunks('sess-1', () => undefined);
+    expect(getTerminalFeedStats()).toEqual([expect.objectContaining({ sessionId: 'sess-1', listeners: 2 })]);
+
+    unsubscribeFirst();
+    expect(getTerminalFeedStats()).toEqual([expect.objectContaining({ sessionId: 'sess-1', listeners: 1 })]);
+  });
+
+  it('hasBufferedFrame is false until the session has bytes or a known grid', () => {
+    expect(hasBufferedFrame('sess-1')).toBe(false);
+    retainTerminal('sess-1');
+    // Retained but empty: re-initialising the WebView from this would paint an
+    // empty grid over whatever good frame is on screen.
+    expect(hasBufferedFrame('sess-1')).toBe(false);
+
+    setTerminalDimensions('sess-1', { cols: 120, rows: 30 });
+    expect(hasBufferedFrame('sess-1')).toBe(true);
+
+    releaseTerminal('sess-1');
+    retainTerminal('sess-1');
+    expect(hasBufferedFrame('sess-1')).toBe(false);
+    seedScrollback('sess-1', 'frame');
+    expect(hasBufferedFrame('sess-1')).toBe(true);
   });
 
   it('records dims for retained sessions and notifies listeners only on change', () => {

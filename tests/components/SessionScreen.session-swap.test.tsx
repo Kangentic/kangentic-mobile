@@ -8,7 +8,7 @@ import { useBoardStore } from '@/state/boardStore';
 import { useSettingsStore } from '@/state/settingsStore';
 import { useTranscriptStore } from '@/state/transcriptStore';
 import { boardColumnFixture, boardTaskFixture, userEntryFixture } from '@/devsupport/desktopFixtures';
-import { closeSessionScreen, openSessionScreen } from '@/connection/actions';
+import { closeSessionScreen, loadArchivedTasks, openSessionScreen } from '@/connection/actions';
 
 jest.mock('react-native-safe-area-context', () =>
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- lazy require, evaluated inside the mock factory
@@ -17,15 +17,24 @@ jest.mock('react-native-safe-area-context', () =>
 
 let mockParams: { taskId: string; sessionId?: string; projectId?: string; mode?: string } = { taskId: 'task-1' };
 const mockPush = jest.fn();
+const mockReplace = jest.fn();
 jest.mock('expo-router', () => ({
   useLocalSearchParams: () => mockParams,
-  useRouter: () => ({ replace: jest.fn(), back: jest.fn(), push: mockPush }),
+  useRouter: () => ({ replace: mockReplace, back: jest.fn(), push: mockPush }),
+  // The real one throws outside a navigator. Everything mounted here is
+  // focused for its whole life, so a plain effect is the faithful stand-in.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- lazy require, evaluated inside the mock factory
+  useFocusEffect: (effect: () => void | (() => void)) => require('react').useEffect(effect, [effect]),
 }));
 
 jest.mock('@/connection/actions', () => ({
   openSessionScreen: jest.fn(),
   closeSessionScreen: jest.fn(),
   moveTaskOptimistic: jest.fn().mockResolvedValue(undefined),
+  // Resolves without writing anything: these tests seed archivedByProjectId
+  // directly, so the fetch is a no-op and the screen's routing is driven by
+  // the store read, which is the coupling worth pinning.
+  loadArchivedTasks: jest.fn().mockResolvedValue(undefined),
 }));
 
 // The panes and the input bar are heavy (FlashList transcript, xterm
@@ -78,6 +87,7 @@ jest.mock('@/screens/task/SessionInputBar', () => {
 
 const openSessionScreenMock = openSessionScreen as jest.Mock;
 const closeSessionScreenMock = closeSessionScreen as jest.Mock;
+const loadArchivedTasksMock = loadArchivedTasks as jest.Mock;
 
 function seedTaskWithSession(sessionId: string | null): void {
   useBoardStore.setState({
@@ -457,6 +467,254 @@ describe('SessionScreen session binding', () => {
     expect(overlayZIndex).toBeGreaterThan(visiblePaneZIndex);
   });
 
+});
+
+/**
+ * A column move that restarts the agent is a session SWAP: the desktop
+ * suspends the old session - which pushes `session-ended` - and spawns the
+ * successor only after the worktree work, a measured median 2.3s later and up
+ * to 24.4s at the tail. Declaring the task dead in that gap is wrong, and the
+ * REJECTED_FEED_GRACE_MS window does not cover it (that one guards a refused
+ * SUBSCRIBE, not a delivered ended push).
+ *
+ * The ordering these pin is the PHONE-INITIATED one, deliberately:
+ * applyOptimisticMove writes the new swimlane the instant the user confirms,
+ * so by the time the ended push lands the column change is old news. A design
+ * that compares the column against "what it was last render" never sees it.
+ * The desktop-initiated ordering (snapshot, then ended) passes either way and
+ * would prove nothing about that.
+ */
+describe('SessionScreen across a column move', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockParams = { taskId: 'task-1', sessionId: 'sess-a', projectId: 'project-1' };
+    useBoardStore.getState().reset();
+    useActivityStore.getState().reset();
+    useTranscriptStore.getState().reset();
+    useSettingsStore.setState({ hasSeenSessionModeHint: true, hydrated: true });
+  });
+
+  /**
+   * A board shaped like a real one: To Do and Done carry their system roles,
+   * the working columns in between carry none. boardColumnFixture defaults to
+   * role 'todo', so an id-only override would give every column the role that
+   * means "no successor is coming" and quietly disable the whole window.
+   */
+  function seedRoledBoard(sessionId: string | null, swimlaneId = 'lane-todo'): void {
+    useBoardStore.setState({
+      projects: [{ id: 'project-1', name: 'Alpha' }],
+      boardsByProjectId: {
+        'project-1': {
+          columns: [
+            boardColumnFixture(),
+            boardColumnFixture({ id: 'lane-doing', name: 'Doing', role: null, position: 1 }),
+            boardColumnFixture({ id: 'lane-review', name: 'Review', role: null, position: 2 }),
+            boardColumnFixture({ id: 'lane-done', name: 'Done', role: 'done', position: 3 }),
+          ],
+          tasksById: {
+            'task-1': boardTaskFixture({ id: 'task-1', session_id: sessionId, swimlane_id: swimlaneId }),
+          },
+          snapshotAt: 0,
+          showTicketNumbers: true,
+          view: 'full',
+          taskCountsByColumnId: {},
+        },
+      },
+      pendingMoves: [],
+    });
+  }
+
+  function moveTaskToColumn(targetSwimlaneId: string): void {
+    useBoardStore.getState().applyOptimisticMove({
+      projectId: 'project-1',
+      taskId: 'task-1',
+      toSwimlaneId: targetSwimlaneId,
+      toPosition: 0,
+    });
+  }
+
+  it('shows the switching state, not the ended state, while a move is in flight', () => {
+    seedRoledBoard('sess-a');
+    renderSessionScreen();
+
+    // The user confirms the move: the card lands in the new column at once.
+    act(() => {
+      moveTaskToColumn('lane-doing');
+    });
+    // Seconds later the desktop's suspend reaches the phone. The successor
+    // does not exist yet.
+    act(() => {
+      pushSessionEnded('sess-a');
+    });
+
+    // The ended assertion runs FIRST, deliberately: it is the reported bug
+    // (the overlay flashing mid-move), and a missing switching testID would
+    // otherwise mask it as "the component is not there" rather than "the
+    // screen declared the task dead".
+    expect(screen.queryByTestId('session-ended-state')).toBeNull();
+    expect(screen.getByTestId('session-switching-state')).toBeTruthy();
+    // Nothing to type into between two sessions.
+    expect(screen.queryByTestId('stub-session-input-bar')).toBeNull();
+  });
+
+  it('clears the switching state when the successor session binds', () => {
+    seedRoledBoard('sess-a');
+    renderSessionScreen();
+    act(() => {
+      moveTaskToColumn('lane-doing');
+    });
+    act(() => {
+      pushSessionEnded('sess-a');
+    });
+    expect(screen.getByTestId('session-switching-state')).toBeTruthy();
+
+    // The desktop spawned the successor and the settled snapshot carries it.
+    act(() => {
+      seedRoledBoard('sess-b', 'lane-doing');
+    });
+
+    expect(screen.queryByTestId('session-switching-state')).toBeNull();
+    expect(screen.queryByTestId('session-ended-state')).toBeNull();
+    expect(openSessionScreenMock).toHaveBeenCalledWith('sess-b');
+  });
+
+  it('falls back to the ended state when no successor arrives within the grace window', () => {
+    jest.useFakeTimers();
+    try {
+      seedRoledBoard('sess-a');
+      renderSessionScreen();
+      act(() => {
+        moveTaskToColumn('lane-doing');
+      });
+      act(() => {
+        pushSessionEnded('sess-a');
+      });
+      expect(screen.getByTestId('session-switching-state')).toBeTruthy();
+
+      act(() => {
+        jest.advanceTimersByTime(20_001);
+      });
+
+      expect(screen.queryByTestId('session-switching-state')).toBeNull();
+      expect(screen.getByTestId('session-ended-state')).toBeTruthy();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  /**
+   * A move to To Do is a full reset - the session is killed and the worktree
+   * removed - so there is no successor to wait for and the honest answer is
+   * immediate. `boardColumnFixture` defaults to the todo role.
+   */
+  it('shows the ended state immediately for a move to the To Do column', () => {
+    // Starts in Doing, so the move to To Do is a real column change.
+    seedRoledBoard('sess-a', 'lane-doing');
+    renderSessionScreen();
+
+    act(() => {
+      moveTaskToColumn('lane-todo');
+    });
+    act(() => {
+      pushSessionEnded('sess-a');
+    });
+
+    expect(screen.queryByTestId('session-switching-state')).toBeNull();
+    expect(screen.getByTestId('session-ended-state')).toBeTruthy();
+  });
+
+  /**
+   * Done deletes the worktree and archives the task, so the session screen has
+   * nowhere good to stand: the ended state offers "View changes" for a diff
+   * read-diff would answer from the PROJECT checkout, and its Move button
+   * disappears with the card. The completed view is the destination the board
+   * already uses for an archived task.
+   */
+  it('replaces itself with the completed-task view once the task is archived', () => {
+    seedRoledBoard('sess-a');
+    renderSessionScreen();
+
+    act(() => {
+      pushSessionEnded('sess-a');
+      // The desktop archived the task: it leaves the board snapshot entirely
+      // (every board query filters archived_at IS NULL) and arrives in the
+      // archive page the screen asked for.
+      seedBoardWithoutTask();
+      useBoardStore.setState({
+        archivedByProjectId: {
+          'project-1': {
+            tasks: [
+              boardTaskFixture({
+                id: 'task-1',
+                session_id: null,
+                archived_at: '2026-09-11T00:00:00.000Z',
+              }),
+            ],
+            totalCount: 1,
+            summariesByTaskId: {},
+            nextOffset: 1,
+            loading: false,
+          },
+        },
+      });
+    });
+
+    expect(mockReplace).toHaveBeenCalledWith({
+      pathname: '/completed-task',
+      params: { taskId: 'task-1', projectId: 'project-1' },
+    });
+  });
+
+  /**
+   * The first look is legitimately too early. A move to Done writes the task
+   * into the done column OPTIMISTICALLY, seconds before the desktop archives
+   * anything, so that page comes back without it. A plain "fetched once" guard
+   * would then never look again and the screen would sit under the ended state
+   * for a task that completed.
+   */
+  it('asks for the archive again once the task actually leaves the board', () => {
+    seedRoledBoard('sess-a');
+    renderSessionScreen();
+    expect(loadArchivedTasksMock).not.toHaveBeenCalled();
+
+    // Optimistic: the card is in Done, the desktop has not archived yet.
+    act(() => {
+      moveTaskToColumn('lane-done');
+    });
+    expect(loadArchivedTasksMock).toHaveBeenCalledTimes(1);
+
+    // Authoritative: the archive row exists, so the task is gone from the board.
+    act(() => {
+      seedBoardWithoutTask();
+    });
+    expect(loadArchivedTasksMock).toHaveBeenCalledTimes(2);
+    expect(loadArchivedTasksMock).toHaveBeenLastCalledWith({ projectId: 'project-1' });
+  });
+
+  it('does not redirect a task that is still on the board', () => {
+    seedRoledBoard('sess-a');
+    renderSessionScreen();
+
+    act(() => {
+      pushSessionEnded('sess-a');
+      // A stale archive page from an earlier visit, for a task that has since
+      // been moved back out of Done and is live on the board again.
+      useBoardStore.setState({
+        archivedByProjectId: {
+          'project-1': {
+            tasks: [boardTaskFixture({ id: 'task-1', archived_at: '2026-09-01T00:00:00.000Z' })],
+            totalCount: 1,
+            summariesByTaskId: {},
+            nextOffset: 1,
+            loading: false,
+          },
+        },
+      });
+    });
+
+    expect(mockReplace).not.toHaveBeenCalled();
+    expect(screen.getByTestId('session-ended-state')).toBeTruthy();
+  });
 });
 
 /**

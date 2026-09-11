@@ -4,7 +4,7 @@
  * Runs over the real loopback + stub initiator so the whole encode/seal/
  * decode path is exercised, not a mocked CapabilityClient.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   generateX25519KeyPair,
   type CapabilityRequestMessage,
@@ -172,6 +172,43 @@ describe('VerbClient', () => {
       'board-tool-write',
     ]);
     expect(requests[4].payload).toEqual({ tool: 'create_task', params: { title: 'New', description: '', column: 'To Do' } });
+  });
+
+  /**
+   * move-task is the one verb whose answer waits on real desktop work rather
+   * than a lookup. An older desktop awaits the whole of handleTaskMove - PTY
+   * suspend, worktree removal, respawn - and 9% of measured task:move calls ran
+   * past the shared 10s default, slowest 24.4s. Those rejected as a plain
+   * timeout, which MoveTaskScreen shows as "Move failed - check the
+   * connection" while moveTaskOptimistic rolls the card back, for a move the
+   * desktop had already committed.
+   */
+  it('gives move-task a longer timeout than every other verb', async () => {
+    // Harness first, on real timers: the handshake flush needs them.
+    const { verbs } = await establishedHarness(() => null); // the desktop never answers
+    vi.useFakeTimers();
+    try {
+      const moveSettled = verbs
+        .moveTask({ taskId: 'task-1', targetSwimlaneId: 'lane-doing', targetPosition: 0, projectId: 'project-1' })
+        .then(() => 'resolved', () => 'rejected');
+      const messageSettled = verbs.sendUserMessage('sess-1', 'keep going').then(() => 'resolved', () => 'rejected');
+      let moveHasSettled = false;
+      void moveSettled.then(() => {
+        moveHasSettled = true;
+      });
+
+      // Past the shared default: the ordinary verb is already gone.
+      await vi.advanceTimersByTimeAsync(11_000);
+      await expect(messageSettled).resolves.toBe('rejected');
+      expect(moveHasSettled).toBe(false);
+
+      // And past the measured desktop tail it does eventually give up, rather
+      // than hanging forever.
+      await vi.advanceTimersByTimeAsync(40_000);
+      await expect(moveSettled).resolves.toBe('rejected');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('registerPush sends the typed registration payload and parses the boolean result', async () => {
