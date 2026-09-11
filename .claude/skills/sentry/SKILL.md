@@ -208,6 +208,19 @@ its own board.
     as task #62 at time of writing): every session-screen open leaks its xterm WebView and view
     subtree, which nothing ever releases. Cross-check `firstSeen`/build version before assuming
     a fresh event is the same root cause - it may already be fixed.
+- **Read the breadcrumbs before reasoning about the code.** On a native-captured event
+  (`mechanism: UncaughtExceptionHandler`) sentry-android's own auto-breadcrumbs ride along
+  unfiltered, so every such event carries a free **lifecycle timeline**: `app.lifecycle`
+  foreground/background transitions, `ui.lifecycle` activity states, `device.event`
+  (`SCREEN_ON`/`SCREEN_OFF`, `LOW_MEMORY`, battery), `device.orientation`, and `network.event`.
+  `.claude/rules/crash-reporting-scope.md` documents these as a privacy LIMITATION; they are also
+  the cheapest diagnostic available, and worth reading first on anything lifecycle-shaped (a
+  background service, a startup crash, a leak). MOBILE-3 is the precedent: two builds were spent
+  guessing at mechanisms, and the breadcrumbs settled it in minutes by showing the app went to
+  background and never returned while the process stayed alive 7h10m and 14h14m. Note the
+  timestamps come back in local time from the API - convert to UTC before subtracting, or the gap
+  is wrong by the offset. A `device.orientation` breadcrumb also implies the display was ON, which
+  is how that issue ruled out a timer-starvation theory.
 - **Cross-reference locally before concluding.** `Grep` the screen or module named by the top
   frame and read it. `.claude/rules/crash-reporting-scope.md` documents this project's privacy
   controls and their known limitations in detail - read it rather than restating it here.

@@ -32,6 +32,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppState, type AppStateStatus } from 'react-native';
 import type { StubSessionInitiator } from '@/devsupport/stubDesktopPeer';
+import type { LoopbackTransport } from '@/devsupport/loopbackTransport';
 import { useSettingsStore } from '@/state/settingsStore';
 import { useChannelStore } from '@/state/channelStore';
 // Safe to import statically: permissionCache has no imports at all, which is
@@ -88,7 +89,7 @@ vi.mock('@notifee/react-native', () => ({
   AuthorizationStatus: { NOT_DETERMINED: -1, DENIED: 0, AUTHORIZED: 1, PROVISIONAL: 2 },
 }));
 
-const mockDesktopSeam = vi.hoisted(() => ({ stub: null as unknown }));
+const mockDesktopSeam = vi.hoisted(() => ({ stub: null as unknown, phoneTransport: null as unknown }));
 
 vi.mock('@/connection/mockDesktop', async () => {
   const { createLoopbackPair } = await import('@/devsupport/loopbackTransport');
@@ -104,6 +105,7 @@ vi.mock('@/connection/mockDesktop', async () => {
         phoneStaticPublicKey: identity.publicKey,
       });
       mockDesktopSeam.stub = stub;
+      mockDesktopSeam.phoneTransport = phoneTransport;
       return {
         identity,
         desktopStaticPublicKey: desktopStatic.publicKey,
@@ -192,6 +194,7 @@ describe('connectionManager background keepalive ceiling', () => {
     mockRunBootstrap.mockReset();
     mockRunBootstrap.mockResolvedValue(undefined);
     mockDesktopSeam.stub = null;
+    mockDesktopSeam.phoneTransport = null;
     // Module-level state: without this reset the denied-permission test below
     // would leak into whatever runs after it.
     setNotificationPermissionStatus('granted');
@@ -308,6 +311,53 @@ describe('connectionManager background keepalive ceiling', () => {
       // The rekey landed, so the teardown below is the rekey's doing and not a
       // handshake that quietly failed and dropped the connection instead.
       expect(stub.establishedCount).toBeGreaterThan(handshakeRoundsBefore);
+      expect(getActiveConnection()).toBeNull();
+      expect(notifeeMocks.stopForegroundService).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      nowSpy.mockRestore();
+    }
+  });
+
+  /**
+   * The rekey backstop above has a gap this one closes: it needs the desktop to
+   * still be there. Close the laptop and no rekey ever arrives again, while the
+   * phone's transport drops and retries on its own backoff forever with the
+   * foreground service still up. That is the most likely real shape of MOBILE-3
+   * - an overnight stretch with nothing left driving the ceiling but the timer
+   * that demonstrably did not fire.
+   *
+   * simulateReconnect is deliberately the blip path ('reconnecting' then back to
+   * 'connected', never through 'closed'), which loopbackTransport's own comment
+   * calls out as the one code watching only for 'closed' treats as if nothing
+   * happened. Any state change counts as a wake source, so even a blip that
+   * recovers gives the wall-clock check its chance.
+   *
+   * Same fake-timer split as above: setTimeout is faked and never advanced, so
+   * the ceiling timer is armed and inert, and only Date.now moves. Dropping the
+   * queueMicrotask(onKeepaliveWakeSource) from the transport listener makes this
+   * fail with a live connection.
+   */
+  it('tears the keepalive down on a transport blip when the ceiling timer never fires', async () => {
+    const { getActiveConnection } = await import('@/connection/connectionManager');
+    const onAppStateChange = await establishAndWarm();
+    const phoneTransport = mockDesktopSeam.phoneTransport as LoopbackTransport;
+    const armedAtMs = Date.now();
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(armedAtMs);
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      onAppStateChange('background');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(notifeeMocks.displayNotification).toHaveBeenCalledTimes(1);
+      expect(getActiveConnection()).not.toBeNull();
+
+      nowSpy.mockReturnValue(armedAtMs + EXPECTED_KEEPALIVE_CEILING_MS);
+      phoneTransport.simulateReconnect();
+      for (let round = 0; round < 20 && getActiveConnection() !== null; round += 1) {
+        await vi.advanceTimersByTimeAsync(0);
+      }
+
       expect(getActiveConnection()).toBeNull();
       expect(notifeeMocks.stopForegroundService).toHaveBeenCalled();
     } finally {
@@ -501,6 +551,7 @@ describe('connectionManager notification permission prompt', () => {
     mockRunBootstrap.mockReset();
     mockRunBootstrap.mockResolvedValue(undefined);
     mockDesktopSeam.stub = null;
+    mockDesktopSeam.phoneTransport = null;
     platformMock.OS = 'android';
     setNotificationPermissionStatus('granted');
     notifeeMocks.requestPermission.mockClear();
@@ -795,6 +846,7 @@ describe('connectionManager foreground permission refresh (cross-platform)', () 
     mockRunBootstrap.mockReset();
     mockRunBootstrap.mockResolvedValue(undefined);
     mockDesktopSeam.stub = null;
+    mockDesktopSeam.phoneTransport = null;
     setNotificationPermissionStatus('granted');
     notifeeMocks.getNotificationSettings.mockReset();
     notifeeMocks.getNotificationSettings.mockResolvedValue({ authorizationStatus: 1 });
