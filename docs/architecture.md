@@ -145,7 +145,13 @@ src/
   notifications/   # Push registration, E2E blob decrypt, notifee channels, local notifier,
                   #   foreground service, background push task, tap routing (tap routing
                   #   and rich display are cross-platform; the iOS half decrypts in
-                  #   the Notification Service Extension under targets/nse/)
+                  #   the Notification Service Extension under targets/nse/). tapRouter
+                  #   publishes a pending navigation and never navigates itself
+  navigation/      # The pending-navigation slot + PendingNavigationRunner: the only code that
+                  #   performs a navigation published from outside React. Exists because
+                  #   expo-router's imperative router enqueues rather than navigates, and the
+                  #   queue drains in an effect that throws fatally when no navigator has
+                  #   mounted (the iOS 0.6.3 build 13 cold-start crash)
   state/           # Zustand stores (activity/board/transcript/diff/channel/settings) +
                   #   the non-Zustand terminalFeed PTY ring buffers
   voice/           # Dictation hook over the OS speech engines
@@ -482,7 +488,38 @@ subscribes to the listener and then compares the same field (`determineNextRespo
 package's changelog records a fixed iOS bug where the response listener emitted duplicate
 events. Without the guard the same task screen is pushed twice and the user needs two back
 presses to leave it. The guard engages only on a non-empty string identifier, so a payload
-without one still routes: dropping a real tap is worse than a rare double.
+without one still routes: dropping a real tap is worse than a rare double. Note it is a
+LAST-ATTEMPTED latch, written before the decrypt, so re-running `routeFromPushResponse` with the
+same response routes nowhere - which is why the pending slot below holds the resolved target
+rather than the raw response.
+
+**`tapRouter.ts` never navigates.** It publishes the resolved
+`{ taskId, projectId, sessionId }` to the shared slot in
+`src/navigation/pendingNavigation.ts`, and `PendingNavigationRunner` - rendered in
+`app/_layout.tsx` as a sibling of the root `Stack`, immediately after it - consumes it and
+performs the `router.push` from inside React. The
+desktop-revocation reset in `connectionManager.ts` publishes a `reset-to-root` intent through the
+same slot, for the same reason. That split is not stylistic. `router.push` does not navigate; it
+appends to expo-router's routing queue,
+which is drained by a React effect in `NavigationContainerInner` that calls
+`store.assertIsReady()` and throws *'Attempted to navigate before mounting the Root Layout
+component'* when no navigator child has mounted yet. On a native cold start that window is real:
+expo-router wraps its content in a `SafeAreaProvider` with no `initialMetrics`, and that provider
+renders null children until the OS reports insets, while the navigation container above it has
+already attached its ref. The drain effect sits above every route error boundary - including the
+`AppErrorBoundaryScreen` added alongside this fix, which sits lower in the tree - so the throw
+reaches the global handler and aborts the process anyway: the iOS TestFlight cold-start crash on
+0.6.3 build 13. A `try/catch` around `push` cannot help, because `push` itself never throws.
+
+The platforms differed only in how the same defect surfaced: `getInitialURLWithTimeout` is
+synchronous on iOS and a Promise on Android, so iOS mounted the container (ref set, not ready)
+and threw, while Android early-returned its fallback (ref null) and **silently dropped the tap**
+instead. Both are fixed by consuming from inside the tree. There is deliberately no
+`navigationRef.isReady()` guard in the consumer: react-navigation registers the focus listener
+that `isReady()` tests in a *passive* effect on an ancestor of the root layout, so it still reads
+false at the consumer's own effect: a blocking guard there would defer with no retry signal and
+drop the tap. Correctness comes from tree position, since the drain runs after the navigator's
+effect in the same commit.
 
 The runtime notification permission - Android 13+'s `POST_NOTIFICATIONS` and iOS's
 `UNUserNotificationCenter` authorization, both via `notifee.requestPermission()` - is requested

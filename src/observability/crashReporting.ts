@@ -106,6 +106,26 @@ export function crashNatively(): void {
 }
 
 /**
+ * Reports an error that a React error boundary CAUGHT.
+ *
+ * This exists because a boundary changes what gets reported, not just what
+ * gets rendered: React hands a caught error to the boundary instead of to
+ * `ErrorUtils`, so the global handler never sees it. Adding a boundary without
+ * this call would trade a visible crash for an invisible one - strictly worse
+ * while iOS delivery is still unproven (see the `mobile` project's missing iOS
+ * events). So every boundary reports through here.
+ *
+ * A no-op when `Sentry.init()` never ran, which is every build made from
+ * source. The event still passes through `beforeSend`/`scrubEvent` like any
+ * other JS-captured event, so the privacy controls in
+ * `.claude/rules/crash-reporting-scope.md` apply unchanged.
+ */
+export function reportCaughtError(error: Error, boundary: string): void {
+  if (!initialized) return;
+  Sentry.captureException(error, { tags: { errorBoundary: boundary } });
+}
+
+/**
  * No DSN means no `Sentry.init()` at all, so the native SDK never starts
  * and nothing is collected or stored on device. That is the state for every
  * build a contributor or self-hoster makes from source: `EXPO_PUBLIC_SENTRY_DSN`

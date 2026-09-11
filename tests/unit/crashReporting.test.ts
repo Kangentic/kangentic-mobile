@@ -22,6 +22,7 @@ const sentryState = vi.hoisted(() => {
     init: vi.fn(),
     breadcrumbsIntegration: vi.fn(() => freshBreadcrumbsIntegration),
     nativeCrash: vi.fn(),
+    captureException: vi.fn(),
     freshBreadcrumbsIntegration,
   };
 });
@@ -30,6 +31,7 @@ vi.mock('@sentry/react-native', () => ({
   init: sentryState.init,
   breadcrumbsIntegration: sentryState.breadcrumbsIntegration,
   nativeCrash: sentryState.nativeCrash,
+  captureException: sentryState.captureException,
 }));
 
 type ReactNativeInitOptions = Parameters<typeof SentryReactNative.init>[0];
@@ -333,6 +335,54 @@ describe('crashTestEnabled', () => {
     setCrashTestFlag('true');
     const crashReporting = await loadFreshCrashReporting();
     expect(crashReporting.crashTestEnabled()).toBe(false);
+  });
+});
+
+describe('reportCaughtError', () => {
+  const originalDsn = process.env.EXPO_PUBLIC_SENTRY_DSN;
+  const originalE2eFlag = process.env.EXPO_PUBLIC_KANGENTIC_E2E;
+  const originalCrashTestFlag = process.env.EXPO_PUBLIC_KANGENTIC_CRASHTEST;
+
+  beforeEach(() => {
+    sentryState.captureException.mockClear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    setSentryDsn(originalDsn);
+    setE2eFlag(originalE2eFlag);
+    setCrashTestFlag(originalCrashTestFlag);
+  });
+
+  it('does not call Sentry.captureException when the module never initialised (no DSN, every build made from source)', async () => {
+    setSentryDsn(undefined);
+    setE2eFlag(undefined);
+    vi.stubGlobal('__DEV__', false);
+
+    const crashReporting = await loadFreshCrashReporting();
+    // Deliberately never called initializeCrashReporting(): this is the state
+    // of a boundary catching a render error before init ran, and of every
+    // fork or self-hosted build that never gets a DSN at all.
+    crashReporting.reportCaughtError(new Error('boundary threw'), 'root-layout');
+
+    expect(sentryState.captureException).not.toHaveBeenCalled();
+  });
+
+  it('calls Sentry.captureException with the caught error and the boundary tag once initialised', async () => {
+    setSentryDsn(testDsn);
+    setE2eFlag(undefined);
+    setCrashTestFlag(undefined);
+    vi.stubGlobal('__DEV__', false);
+
+    const crashReporting = await loadFreshCrashReporting();
+    crashReporting.initializeCrashReporting();
+    const caughtError = new Error('boundary threw');
+    crashReporting.reportCaughtError(caughtError, 'root-layout');
+
+    expect(sentryState.captureException).toHaveBeenCalledTimes(1);
+    expect(sentryState.captureException).toHaveBeenCalledWith(caughtError, {
+      tags: { errorBoundary: 'root-layout' },
+    });
   });
 });
 

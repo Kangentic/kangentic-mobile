@@ -33,9 +33,10 @@ modify any files.
 ## First Step: Load Context
 
 Read `.claude/rules/expo-cng.md`, `.claude/rules/ui-conventions.md`,
-`.claude/rules/motion-conventions.md`, `.claude/rules/performance-claims-are-measured.md`, and
-`.claude/rules/text-formatting.md` before reviewing. If the diff adds a dependency, check its
-README or changelog for New Architecture / Expo SDK compatibility statements.
+`.claude/rules/motion-conventions.md`, `.claude/rules/performance-claims-are-measured.md`,
+`.claude/rules/text-formatting.md`, and
+`.claude/rules/imperative-router-inside-react.md` before reviewing. If the diff adds a dependency,
+check its README or changelog for New Architecture / Expo SDK compatibility statements.
 
 ## Audit Checklist
 
@@ -85,6 +86,15 @@ README or changelog for New Architecture / Expo SDK compatibility statements.
    code, comments, docs, or markdown (this repo's `tests/`/`docs/` trees have no mechanical
    scanner, so this review is the only coverage there).
 9. **Personal-info scan.** Hardcoded usernames, emails, or machine-specific absolute paths.
+
+10. **Imperative router confinement.** Against `imperative-router-inside-react.md`: expo-router's
+    `router` singleton reached from outside a mounted navigator - module scope, a notifee or
+    expo-notifications callback, a lifecycle manager, a store subscription - including via
+    `require('expo-router')` or `await import('expo-router')`, which the ESLint ban cannot see.
+    The fix is to publish to `src/navigation/pendingNavigation.ts`, never a try/catch at the call
+    site: `router.push` only enqueues, so it never throws where it is called. Also flag a
+    `navigationRef.isReady()` guard added to `PendingNavigationRunner` (it reads false there and
+    drops the navigation) and any move of that component above or inside the root `Stack`.
 
 ## Output Format
 

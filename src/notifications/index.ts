@@ -26,6 +26,10 @@ export {
   reassertConnectedForegroundService,
   setConnectedForegroundServiceDesired,
 } from './foregroundService';
+// NOTE the component that performs tap navigation lives in
+// src/navigation/PendingNavigationRunner.tsx and is deliberately NOT re-exported
+// here: it pulls in React and expo-router, and this barrel is imported by
+// node-env unit tests that cannot parse them.
 
 let initialized = false;
 

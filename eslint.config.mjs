@@ -15,6 +15,32 @@ const restrictedHapticsImportPaths = [
   },
 ];
 
+// expo-router's imperative `router` singleton is confined to the directories
+// that render inside a mounted navigator. Hoisted because it appears in THREE
+// entries for the last-match-wins reason above.
+//
+// `router.push`/`navigate` do not navigate: they append to expo-router's
+// routingQueue and return. The queue is drained inside a React effect that
+// calls `store.assertIsReady()` and throws 'Attempted to navigate before
+// mounting the Root Layout component' when no navigator has mounted. On a
+// native cold start that window is real, the drain sits above every error
+// boundary, and the throw aborts the process - the iOS 0.6.3 build 13
+// TestFlight crash. A try/catch at the call site cannot help, because the call
+// itself never throws.
+//
+// Note this catches STATIC imports only. `no-restricted-imports` never matches
+// `require()` or a dynamic `import()`, and the second live instance of this bug
+// reached the router via `await import('expo-router')`. That hole is covered by
+// tests/unit/imperativeRouterConfinement.test.ts, not by this rule.
+const restrictedRouterImportPaths = [
+  {
+    name: 'expo-router',
+    importNames: ['router'],
+    message:
+      "Publish to the pending slot in '@/navigation/pendingNavigation' instead of calling expo-router's imperative router here - outside a mounted navigator it enqueues a navigation that throws fatally when drained. Hooks and components (Stack, Link, useRouter, useLocalSearchParams) are fine. See .claude/rules/imperative-router-inside-react.md.",
+  },
+];
+
 // The two motion `no-restricted-syntax` bans, hoisted for the same reason as
 // the haptics paths above: each appears in more than one entry, and a copy that
 // drifts is a ban that quietly stops matching.
@@ -140,7 +166,10 @@ export default defineConfig([
     files: ['src/**/*.ts', 'src/**/*.tsx', 'app/**/*.ts', 'app/**/*.tsx'],
     ignores: ['src/lib/haptics.ts'],
     rules: {
-      'no-restricted-imports': ['error', { paths: restrictedHapticsImportPaths }],
+      'no-restricted-imports': [
+        'error',
+        { paths: [...restrictedHapticsImportPaths, ...restrictedRouterImportPaths] },
+      ],
     },
   },
   {
@@ -162,14 +191,16 @@ export default defineConfig([
     // URLs into the demo predicate before any error boundary exists.
     //
     // This is the LAST `no-restricted-imports` match for these directories, so
-    // it carries the haptics ban too: options replace rather than merge, and
-    // dropping `paths` here would exempt these directories from it.
+    // it carries the haptics AND imperative-router bans too: options replace
+    // rather than merge, and dropping either `paths` entry here would exempt
+    // these directories from it. src/notifications is exactly where the router
+    // ban matters most - tapRouter.ts is where the crash came from.
     files: ['src/pairing/**', 'src/channel/**', 'src/demo/**', 'src/devsupport/**', 'src/notifications/**', 'app/+native-intent.ts'],
     rules: {
       'no-restricted-imports': [
         'error',
         {
-          paths: restrictedHapticsImportPaths,
+          paths: [...restrictedHapticsImportPaths, ...restrictedRouterImportPaths],
           patterns: [
             {
               group: ['@sentry/*', '**/observability/*', '@/observability/*'],
@@ -179,6 +210,23 @@ export default defineConfig([
           ],
         },
       ],
+    },
+  },
+  {
+    // The imperative router IS allowed here, because everything in these three
+    // directories renders inside the mounted root navigator, which is the
+    // condition that makes a router call safe. src/navigation is the one that
+    // performs navigation published from outside React.
+    //
+    // Ordered AFTER both entries above and re-stating ONLY the haptics ban,
+    // per the last-match-wins note at the top of this file: this is the last
+    // `no-restricted-imports` match for these directories, so anything omitted
+    // here is exempted, and anything still meant to apply has to be repeated.
+    // These directories are not in the Sentry-ban list, so that one does not
+    // belong here. tests/unit/eslintConfig.test.ts pins the ordering.
+    files: ['src/screens/**', 'src/components/**', 'src/navigation/**'],
+    rules: {
+      'no-restricted-imports': ['error', { paths: restrictedHapticsImportPaths }],
     },
   },
   // Two motion bans share the `no-restricted-syntax` rule, and flat config's

@@ -8,7 +8,16 @@ import * as SplashScreen from 'expo-splash-screen';
 import { ThemeProvider, useTheme } from '@/components';
 import { startConnectionLifecycle } from '@/connection/connectionManager';
 import { initializeNotifications } from '@/notifications';
+import { PendingNavigationRunner } from '@/navigation/PendingNavigationRunner';
+import { AppErrorBoundaryScreen } from '@/screens/AppErrorBoundaryScreen';
 import { useSettingsStore } from '@/state/settingsStore';
+
+/**
+ * expo-router wraps this route in `<Try catch={ErrorBoundary}>`, so exporting
+ * it here puts one boundary around the whole route tree. See the screen for
+ * what it deliberately does NOT cover.
+ */
+export { AppErrorBoundaryScreen as ErrorBoundary };
 
 // Hold the native splash until settings hydrate, then fade it out instead
 // of the default hard cut - the brand mark hands off to the themed UI.
@@ -134,6 +143,18 @@ function RootStack(): React.JSX.Element {
         <Stack.Screen name="devices" options={{ title: 'Paired desktop' }} />
         <Stack.Screen name="+not-found" options={{ title: 'Not found' }} />
       </Stack>
+      {/* Performs navigation published from outside React (a notification tap,
+          a desktop revocation), because those callers run where expo-router's
+          imperative router cannot safely be called.
+
+          POSITION IS THE CORRECTNESS ARGUMENT, so keep it exactly here: a
+          SIBLING of <Stack>, rendered AFTER it, inside the root layout. Passive
+          effects flush child-first and in sibling order, so the Stack's
+          navigator has mounted and registered its focus listener before this
+          component's effect runs. It is NOT a child of <Stack> and must not be
+          moved inside one - <Stack> children are route declarations.
+          See src/navigation/pendingNavigation.ts. */}
+      <PendingNavigationRunner />
     </>
   );
 }
