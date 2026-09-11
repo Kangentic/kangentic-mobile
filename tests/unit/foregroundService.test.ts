@@ -1,16 +1,22 @@
 /**
- * The Android "stay connected" foreground-service notification: the ongoing
- * notification presented while the process keeps the relay socket alive in
- * the background.
+ * The Android "stay connected" foreground service: the ongoing notification
+ * presented while the process keeps the relay socket alive in the background,
+ * and the reconcile loop that owns whether it is actually running.
+ *
+ * The loop exists because of MOBILE-3. The module used to export a bare start
+ * and a bare stop that connectionManager called through two independent dynamic
+ * imports, so they could interleave and leave a live dataSync service behind
+ * with JS believing it was stopped, and a failed stop was swallowed. Both
+ * regression tests below were watched failing against that shape before being
+ * kept - see each one's comment for the mutation.
+ *
+ * Every test reloads the module: the desired/applied sequence is module state,
+ * so a shared instance would carry one test's outstanding work into the next.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import notifee from '@notifee/react-native';
 import { brandTokens } from '@/components/theme/tokens';
-import {
-  registerForegroundServiceRunner,
-  startConnectedForegroundService,
-  stopConnectedForegroundService,
-} from '@/notifications/foregroundService';
+import { flushMicrotasks } from '../helpers/async';
 
 // AndroidImportance and AuthorizationStatus are unused here, but foregroundService.ts
 // reaches channels.ts (for ANDROID_NOTIFICATION_PRESENTATION), which imports both at
@@ -26,20 +32,36 @@ vi.mock('@notifee/react-native', () => ({
   AuthorizationStatus: { NOT_DETERMINED: -1, DENIED: 0, AUTHORIZED: 1, PROVISIONAL: 2 },
 }));
 
-const displayNotification = vi.mocked(notifee.displayNotification);
-const stopForegroundService = vi.mocked(notifee.stopForegroundService);
+type ForegroundServiceRunner = Parameters<typeof notifee.registerForegroundService>[0];
+type ForegroundServiceNotification = Parameters<ForegroundServiceRunner>[0];
+
+async function loadForegroundService() {
+  vi.resetModules();
+  const notifeeModule = await import('@notifee/react-native');
+  const moduleUnderTest = await import('@/notifications/foregroundService');
+  const displayNotification = vi.mocked(notifeeModule.default.displayNotification);
+  const stopForegroundService = vi.mocked(notifeeModule.default.stopForegroundService);
+  const registerForegroundService = vi.mocked(notifeeModule.default.registerForegroundService);
+  displayNotification.mockReset();
+  displayNotification.mockResolvedValue('notification-id');
+  stopForegroundService.mockReset();
+  stopForegroundService.mockResolvedValue(undefined);
+  registerForegroundService.mockReset();
+  return { ...moduleUnderTest, displayNotification, stopForegroundService, registerForegroundService };
+}
 
 describe('foregroundService', () => {
   beforeEach(() => {
-    displayNotification.mockClear();
-    stopForegroundService.mockClear();
+    vi.resetModules();
   });
 
   it('displays the connection notification with the branded small icon and color', async () => {
-    await startConnectedForegroundService();
+    const service = await loadForegroundService();
 
-    expect(displayNotification).toHaveBeenCalledTimes(1);
-    const notification = displayNotification.mock.calls[0][0];
+    service.setConnectedForegroundServiceDesired(true);
+    await vi.waitFor(() => expect(service.displayNotification).toHaveBeenCalledTimes(1));
+
+    const notification = service.displayNotification.mock.calls[0][0];
     expect(notification.title).toBe('Connected to your desktop');
     expect(notification.android?.channelId).toBe('connection');
     expect(notification.android?.asForegroundService).toBe(true);
@@ -49,16 +71,102 @@ describe('foregroundService', () => {
     expect(notification.android?.color).toBe(brandTokens.rust);
   });
 
-  it('registers the long-running task once, however many times it is called', () => {
-    registerForegroundServiceRunner();
-    registerForegroundServiceRunner();
+  it('declares the dataSync service type the manifest also declares', async () => {
+    const service = await loadForegroundService();
 
-    expect(vi.mocked(notifee.registerForegroundService)).toHaveBeenCalledTimes(1);
+    service.setConnectedForegroundServiceDesired(true);
+    await vi.waitFor(() => expect(service.displayNotification).toHaveBeenCalledTimes(1));
+
+    // Android 14+ crashes at startForeground time unless this agrees with
+    // plugins/withAndroidPushService.ts, and nothing else pins the pair.
+    expect(service.displayNotification.mock.calls[0][0].android?.foregroundServiceTypes).toEqual([1]);
+    expect(service.displayNotification.mock.calls[0][0].android?.ongoing).toBe(true);
   });
 
-  it('stops the service on stopConnectedForegroundService', async () => {
-    await stopConnectedForegroundService();
+  it('registers the long-running task once, however many times it is called', async () => {
+    const service = await loadForegroundService();
 
-    expect(stopForegroundService).toHaveBeenCalledTimes(1);
+    service.registerForegroundServiceRunner();
+    service.registerForegroundServiceRunner();
+
+    expect(service.registerForegroundService).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops the service when the desired state goes false', async () => {
+    const service = await loadForegroundService();
+
+    service.setConnectedForegroundServiceDesired(true);
+    await vi.waitFor(() => expect(service.displayNotification).toHaveBeenCalledTimes(1));
+    service.setConnectedForegroundServiceDesired(false);
+
+    await vi.waitFor(() => expect(service.stopForegroundService).toHaveBeenCalledTimes(1));
+  });
+
+  it('serializes a stop declared while the start is still in flight', async () => {
+    const service = await loadForegroundService();
+    let resolveDisplay: (id: string) => void = () => undefined;
+    service.displayNotification.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveDisplay = resolve;
+        }),
+    );
+
+    service.setConnectedForegroundServiceDesired(true);
+    await flushMicrotasks();
+    service.setConnectedForegroundServiceDesired(false);
+    await flushMicrotasks();
+
+    // THE assertion. With the old two-independent-calls shape the stop ran here,
+    // against a service that had not been posted yet, and the start then landed
+    // behind it - a live dataSync service with nothing tracking it. Mutating
+    // setConnectedForegroundServiceDesired back to calling start/stop directly
+    // makes this line fail with 1 call instead of 0; the later waitFor stays
+    // green either way, which is why the negative assertion is the load-bearing
+    // one rather than the call count at the end.
+    expect(service.stopForegroundService).not.toHaveBeenCalled();
+
+    resolveDisplay('notification-id');
+    await vi.waitFor(() => expect(service.stopForegroundService).toHaveBeenCalledTimes(1));
+  });
+
+  it('retries a rejected stop, and leaves it owed for the next reassert', async () => {
+    const service = await loadForegroundService();
+    service.setConnectedForegroundServiceDesired(true);
+    await vi.waitFor(() => expect(service.displayNotification).toHaveBeenCalledTimes(1));
+
+    service.stopForegroundService.mockRejectedValue(new Error('native stop failed'));
+    service.setConnectedForegroundServiceDesired(false);
+    await vi.waitFor(() => expect(service.stopForegroundService).toHaveBeenCalledTimes(3));
+
+    // Owed, not swallowed. The old code caught the rejection and moved on, so
+    // the service stayed up with no record that it had. Mutating the reconcile
+    // loop to mark the sequence applied on a failed stop makes the reassert a
+    // no-op and this final expectation times out at 3.
+    service.stopForegroundService.mockResolvedValue(undefined);
+    service.reassertConnectedForegroundService();
+    await vi.waitFor(() => expect(service.stopForegroundService).toHaveBeenCalledTimes(4));
+  });
+
+  it('releases a parked runner promise before parking the next one', async () => {
+    const service = await loadForegroundService();
+    service.registerForegroundServiceRunner();
+    const runner = service.registerForegroundService.mock.calls[0][0];
+    const notification = {} as ForegroundServiceNotification;
+
+    let firstRunnerSettled = false;
+    void runner(notification).then(() => {
+      firstRunnerSettled = true;
+    });
+    await flushMicrotasks();
+    expect(firstRunnerSettled).toBe(false);
+
+    // notifee invokes the runner once per service start and the resolver lives
+    // in a single slot, so without this release the first headless JS task is
+    // parked forever - and RN services timers only while one is active, so a
+    // stranded task silently changes timer behaviour app-wide.
+    void runner(notification);
+    await flushMicrotasks();
+    expect(firstRunnerSettled).toBe(true);
   });
 });

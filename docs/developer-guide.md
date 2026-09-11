@@ -1853,7 +1853,18 @@ them are not bugs**. Getting this wrong invalidates every conclusion below, so s
 - **Backgrounded with the channel still established: the DESKTOP never sends.** It suppresses
   remote push to any device with a live bridge session, and `localNotifier.ts` fires over the
   socket instead. A real remote push needs the channel down, which means waiting out the
-  five-minute `BACKGROUND_KEEPALIVE_MAX_MS` ceiling.
+  five-minute `BACKGROUND_KEEPALIVE_MAX_MS` ceiling. **Wait it out with the screen ON.** The
+  ceiling's timer half rides a Choreographer frame callback, and the wall-clock half only fires
+  on a wake source that reaches JS - the desktop's ~2 minute rekey, or an AppState transition. On
+  a dark, idle phone the teardown can take the ceiling plus a rekey interval.
+
+**Checking the foreground service directly**, which is the one reading that does not depend on
+what JS believes: `adb shell dumpsys activity services com.kangentic.mobile`. It reports the
+native service state, so it is how you tell "the ceiling fired" from "the ceiling fired and the
+service survived it" - the distinction MOBILE-3 turned on. Pair it with `adb shell pidof
+com.kangentic.mobile`: a process still alive well past the ceiling is the symptom. Note a phone on
+USB never enters Doze, so use wireless adb (`adb tcpip 5555`, `adb connect`) for anything that has
+to reproduce a genuinely idle device.
 
 The state you want is: launched at least once since any force-stop, then backgrounded or killed
 with `am kill`, with no established channel.

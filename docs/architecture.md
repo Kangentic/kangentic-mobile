@@ -194,7 +194,7 @@ the local notifier instead of disposing.
 **That keepalive is bounded to five minutes** (`BACKGROUND_KEEPALIVE_MAX_MS`), after which it
 stops the service and disposes the channel, handing alerting to remote push. Three reasons, and
 the bound is not tunable upward without revisiting all three. Android 15+ gives a `dataSync`
-foreground service a cumulative 6h/24h budget and kills the process on overrun; notifee 9.1.8
+foreground service a 6h/24h budget and kills the process on overrun; notifee 9.1.8
 exposes no `Service.onTimeout` hook, so there is no signal to react to and a JS timer is the only
 bound available; and an unbounded service held the process resident for hours at a time, which is
 how it bears on the REACT-NATIVE-5 OOM. Note what that third reason is NOT: the background path
@@ -202,6 +202,29 @@ does not leak, and four measured probes in the developer guide say so. The leak 
 FOREGROUND path (a session screen retains its native view subtree per open), and an
 always-resident process is simply what stopped an OS kill from ever resetting that accumulation.
 The ceiling makes the process reapable again.
+
+**The bound is enforced twice, because once was not enough.** MOBILE-3 recurred on a build that
+already had the timer above (it has shipped since versionCode 5), and the two crash events say
+plainly what happened: the app went to background, never returned, and the process was still alive
+7h10m and 14h14m later with the service running. RN services every `setTimeout` from a
+Choreographer frame callback, so the ceiling timer is only ever as reliable as frame delivery to a
+backgrounded app. The ceiling is therefore also checked against the **wall clock**
+(`enforceKeepaliveCeiling`) from wake sources that reach JS by another route: the desktop's ~2
+minute rekey, which arrives as an inbound relay frame, and AppState transitions. Worst case the
+service lives for the ceiling plus one rekey interval rather than forever.
+
+**Correction, same issue: the budget does not accumulate across background stretches.** This
+section and `connectionManager.ts` both used to reason about exhausting the 6h budget over many
+short stretches ("72 separate background stretches"). Android resets that counter whenever the user
+brings the app to the foreground, and `startBackgroundKeepalive` has exactly one caller - the
+`'background'` transition, gated on an established connection, which needs an `openConnection()`
+from `'active'`. Every window is preceded by a foreground visit that resets the counter, so
+accumulation is unreachable. The real constraint is stricter: overrunning needs ONE unbroken ~6
+hour background stretch in which the service never stopped. What matters is not how many windows
+are armed, it is that a single window's teardown always lands - which is why
+`src/notifications/foregroundService.ts` owns the native state behind one serialized reconcile
+loop, retries a stop rather than swallowing it, and issues an unconditional stop at process start
+for a service Android restarted with nothing in JS tracking it.
 
 **Not "fixing the unmount": React unmounts correctly.** This sentence used to end "fixing the
 unmount is the real repair", which named the wrong cause. Measured on 2026-08-29, six pops produce
@@ -416,7 +439,9 @@ outside React). While backgrounded in foreground-service mode, `localNotifier.ts
 activity-store transitions into the same notifications locally (three of the five categories have
 an activity-store signal to fire from; 30s per-session-per-category cooldown, suppressed while
 foregrounded, and gated by the same per-category Settings toggle as remote push), and
-`foregroundService.ts` owns the ongoing LOW-importance connection notification.
+`foregroundService.ts` owns the ongoing LOW-importance connection notification, and with it the
+service's native state: callers declare a desired state and one serialized reconcile loop applies
+it, so a start and a stop can never interleave into an orphaned service (MOBILE-3).
 
 Taps route to the task screen via `tapRouter.ts`, differently per platform because the two carry
 task identity differently. Android reads `{ taskId, projectId, sessionId }` straight off the

@@ -1,7 +1,7 @@
 import { Platform } from 'react-native';
 import { createNotificationChannels, refreshNotificationPermission } from './channels';
 import { registerBackgroundPushTask } from './backgroundPushTask';
-import { registerForegroundServiceRunner } from './foregroundService';
+import { registerForegroundServiceRunner, stopOrphanedForegroundServiceAtBoot } from './foregroundService';
 import { registerNotificationTapHandlers } from './tapRouter';
 
 export { openSystemNotificationSettings, refreshNotificationPermission, requestNotificationPermission } from './channels';
@@ -22,7 +22,10 @@ export {
 } from './pushRegistration';
 export { clearPushRegistration } from './pushKeys';
 export { startLocalNotifier } from './localNotifier';
-export { startConnectedForegroundService, stopConnectedForegroundService } from './foregroundService';
+export {
+  reassertConnectedForegroundService,
+  setConnectedForegroundServiceDesired,
+} from './foregroundService';
 
 let initialized = false;
 
@@ -57,6 +60,11 @@ export function initializeNotifications(): void {
   });
   if (Platform.OS !== 'android') return;
   registerForegroundServiceRunner();
+  // Process start, so nothing can have declared a keepalive yet: any dataSync
+  // service alive right now was restarted by Android after a process death and
+  // has nothing bounding it. That is one of the ways MOBILE-3 reaches its 6h
+  // budget, and no in-process flag could ever see it.
+  stopOrphanedForegroundServiceAtBoot();
   registerBackgroundPushTask();
   void createNotificationChannels().catch(() => {
     // Channel creation failing (no notification permission model applies
