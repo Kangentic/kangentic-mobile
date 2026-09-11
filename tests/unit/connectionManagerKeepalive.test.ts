@@ -3,11 +3,20 @@
  *
  * Backgrounding with backgroundNotificationsMode 'foreground-service' keeps the
  * relay socket and Noise session alive under a notifee dataSync foreground
- * service. Android 15+ gives that service a cumulative 6h/24h budget and kills
- * the process when it overruns, and notifee 9.1.8 exposes no Service.onTimeout
- * hook to catch the signal - so a JS-side ceiling is the only bound that exists
- * in this stack. Unbounded, the service also kept the Java heap growing until it
- * hit its 256MB limit and the app froze in GC thrash on resume.
+ * service. Android 15+ gives that service a 6h/24h budget and kills the process
+ * when it overruns, and notifee 9.1.8 exposes no Service.onTimeout hook to catch
+ * the signal - so an app-side ceiling is the only bound that exists in this
+ * stack. Unbounded, the service also kept the Java heap growing until it hit its
+ * 256MB limit and the app froze in GC thrash on resume.
+ *
+ * That counter resets whenever the app is foregrounded, and every keepalive
+ * window is preceded by a foreground visit, so overrunning needs ONE unbroken
+ * ~6h background stretch in which the service never stopped - not many short
+ * ones adding up. Which is why the ceiling is enforced twice here: the timer,
+ * and a wall-clock check driven by a desktop rekey. Note what the fake-timer
+ * tests below CANNOT cover: whether the real Android timer fires at all. RN
+ * services setTimeout from a Choreographer frame callback, and a fake clock
+ * always fires. Only the rekey test keeps the timer inert on purpose.
  *
  * The harness is lifted from connectionManagerBootstrapRetry.test.ts, which
  * already reaches a REAL established session (real SessionManager KK handshake
@@ -244,6 +253,67 @@ describe('connectionManager background keepalive ceiling', () => {
     onAppStateChange('active');
     await waitUntil(() => useChannelStore.getState().established, { label: 're-established after the ceiling' });
     expect(getActiveConnection()).not.toBeNull();
+  });
+
+  /**
+   * The wall-clock half of the ceiling, and the reason MOBILE-3 outlived the
+   * timer half on real devices.
+   *
+   * RN services every setTimeout from a Choreographer frame callback, so the
+   * ceiling timer above is only ever as reliable as frame delivery to a
+   * backgrounded phone. Both crash events show what that costs: the app went to
+   * background, never came back, and the process was still alive 7h10m and
+   * 14h14m later with the dataSync service still running.
+   *
+   * So this test fakes setTimeout and then NEVER ADVANCES IT. The ceiling timer
+   * is armed and cannot fire. Only the wall clock moves, and the only thing that
+   * gets JS running again is a desktop rekey - an inbound relay frame, which
+   * reaches JS through the bridge's own queue rather than through Choreographer.
+   *
+   * Date.now is spied separately rather than letting the fake clock own it, the
+   * same split localNotifier.test.ts uses and for the same reason: one clock
+   * driving both would mean advancing past the ceiling also fires the very timer
+   * this test has to keep inert, and the assertion would prove nothing.
+   *
+   * Dropping enforceKeepaliveCeiling() from the rekey listener makes this fail
+   * with a live connection. The ceiling test above stays green either way, which
+   * is why this one exists separately.
+   */
+  it('tears the keepalive down on a desktop rekey when the ceiling timer never fires', async () => {
+    const { getActiveConnection } = await import('@/connection/connectionManager');
+    const onAppStateChange = await establishAndWarm();
+    const stub = mockDesktopSeam.stub as StubSessionInitiator;
+    const handshakeRoundsBefore = stub.establishedCount;
+    const armedAtMs = Date.now();
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(armedAtMs);
+
+    // Only the timer functions. Date stays under the spy above, and nothing
+    // else in this path needs a fake clock - the loopback transport the rekey
+    // travels over is queueMicrotask-driven end to end.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      onAppStateChange('background');
+      await vi.advanceTimersByTimeAsync(0);
+      // Non-vacuity: the service really is up, so there is something to retire.
+      expect(notifeeMocks.displayNotification).toHaveBeenCalledTimes(1);
+      expect(getActiveConnection()).not.toBeNull();
+
+      // Wall clock past the ceiling; the armed timer is never advanced to it.
+      nowSpy.mockReturnValue(armedAtMs + EXPECTED_KEEPALIVE_CEILING_MS);
+      stub.beginHandshake();
+      for (let round = 0; round < 20 && getActiveConnection() !== null; round += 1) {
+        await vi.advanceTimersByTimeAsync(0);
+      }
+
+      // The rekey landed, so the teardown below is the rekey's doing and not a
+      // handshake that quietly failed and dropped the connection instead.
+      expect(stub.establishedCount).toBeGreaterThan(handshakeRoundsBefore);
+      expect(getActiveConnection()).toBeNull();
+      expect(notifeeMocks.stopForegroundService).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      nowSpy.mockRestore();
+    }
   });
 
   /**

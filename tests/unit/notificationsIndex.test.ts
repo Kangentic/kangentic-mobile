@@ -63,10 +63,12 @@ vi.mock('@/notifications/channels', () => ({
 }));
 
 const registerForegroundServiceRunnerMock = vi.hoisted(() => vi.fn());
+const stopOrphanedForegroundServiceAtBootMock = vi.hoisted(() => vi.fn());
 vi.mock('@/notifications/foregroundService', () => ({
   registerForegroundServiceRunner: registerForegroundServiceRunnerMock,
-  startConnectedForegroundService: vi.fn(async () => undefined),
-  stopConnectedForegroundService: vi.fn(async () => undefined),
+  stopOrphanedForegroundServiceAtBoot: stopOrphanedForegroundServiceAtBootMock,
+  setConnectedForegroundServiceDesired: vi.fn(),
+  reassertConnectedForegroundService: vi.fn(),
 }));
 
 const registerBackgroundPushTaskMock = vi.hoisted(() => vi.fn());
@@ -87,10 +89,11 @@ describe('initializeNotifications platform split', () => {
     refreshNotificationPermissionMock.mockClear();
     createNotificationChannelsMock.mockClear();
     registerForegroundServiceRunnerMock.mockClear();
+    stopOrphanedForegroundServiceAtBootMock.mockClear();
     registerBackgroundPushTaskMock.mockClear();
   });
 
-  it('runs all five on Android', async () => {
+  it('runs all six on Android', async () => {
     const initializeNotifications = await loadInitializeNotifications();
 
     initializeNotifications();
@@ -98,6 +101,11 @@ describe('initializeNotifications platform split', () => {
     expect(registerNotificationTapHandlersMock).toHaveBeenCalledTimes(1);
     expect(refreshNotificationPermissionMock).toHaveBeenCalledTimes(1);
     expect(registerForegroundServiceRunnerMock).toHaveBeenCalledTimes(1);
+    // Process start, so nothing can have declared a keepalive yet: a dataSync
+    // service alive here was restarted by Android after a process death and has
+    // nothing bounding it (MOBILE-3). No in-process flag could detect that, so
+    // the sweep is unconditional and this assertion is the only thing pinning it.
+    expect(stopOrphanedForegroundServiceAtBootMock).toHaveBeenCalledTimes(1);
     expect(registerBackgroundPushTaskMock).toHaveBeenCalledTimes(1);
     expect(createNotificationChannelsMock).toHaveBeenCalledTimes(1);
   });
@@ -117,6 +125,7 @@ describe('initializeNotifications platform split', () => {
     expect(registerNotificationTapHandlersMock).toHaveBeenCalledTimes(1);
     expect(refreshNotificationPermissionMock).toHaveBeenCalledTimes(1);
     expect(registerForegroundServiceRunnerMock).not.toHaveBeenCalled();
+    expect(stopOrphanedForegroundServiceAtBootMock).not.toHaveBeenCalled();
     expect(registerBackgroundPushTaskMock).not.toHaveBeenCalled();
     expect(createNotificationChannelsMock).not.toHaveBeenCalled();
   });
@@ -130,6 +139,7 @@ describe('initializeNotifications platform split', () => {
     expect(registerNotificationTapHandlersMock).toHaveBeenCalledTimes(1);
     expect(refreshNotificationPermissionMock).toHaveBeenCalledTimes(1);
     expect(registerForegroundServiceRunnerMock).toHaveBeenCalledTimes(1);
+    expect(stopOrphanedForegroundServiceAtBootMock).toHaveBeenCalledTimes(1);
     expect(registerBackgroundPushTaskMock).toHaveBeenCalledTimes(1);
     expect(createNotificationChannelsMock).toHaveBeenCalledTimes(1);
   });

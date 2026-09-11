@@ -442,8 +442,17 @@ async function performOpenConnection(): Promise<void> {
 
   // The only observable that a rekey happened. Streams and subscriptions
   // survive it untouched, so nothing else here reacts.
+  //
+  // It is also the one thing that reliably runs JS on a backgrounded phone: an
+  // inbound relay frame arrives through the bridge's own queue, not through the
+  // Choreographer callback every setTimeout depends on. That makes the desktop's
+  // ~2 minute rekey the backstop for the keepalive ceiling (MOBILE-3).
   const unsubscribeRekey = controller.session.onRekey(() => {
     useChannelStore.getState().noteRekey();
+    // Deferred a microtask for the same reason onRemoteClosed below is: this
+    // listener fires inside the session's own frame handling, and hitting the
+    // ceiling tears that very session down.
+    queueMicrotask(onKeepaliveWakeSource);
   });
 
   // The desktop's revoke goodbye (see handleDesktopRevocation). Deferred a
@@ -601,7 +610,7 @@ function maybeRequestNotificationPermission(): void {
 /**
  * Hard ceiling on the background keepalive.
  *
- * Android 15+ gives a dataSync foreground service a cumulative 6h/24h budget
+ * Android 15+ gives a dataSync foreground service a 6h/24h budget
  * and kills the process with ForegroundServiceDidNotStopInTimeException when it
  * overruns; notifee 9.1.8 exposes no Service.onTimeout hook, so there is no
  * signal to react to and this timer is the only bound in the stack.
@@ -615,12 +624,29 @@ function maybeRequestNotificationPermission(): void {
  * actual repair.
  *
  * Five minutes covers the case the keepalive is actually for - switched apps
- * for a moment - and puts budget exhaustion out of realistic reach: it would
- * take 72 separate background stretches, each running the full five minutes,
- * inside one 24h window. Anything longer is remote push's job, and push covers
- * the same alert categories: the desktop suppresses its own push only while
- * this phone's channel is established, so tearing the channel down hands
- * alerting over rather than dropping it.
+ * for a moment. Anything longer is remote push's job, and push covers the same
+ * alert categories: the desktop suppresses its own push only while this phone's
+ * channel is established, so tearing the channel down hands alerting over
+ * rather than dropping it.
+ *
+ * CORRECTION (MOBILE-3, which recurred on a build that already had this bound).
+ * This comment used to reassure that exhausting the budget "would take 72
+ * separate background stretches, each running the full five minutes, inside one
+ * 24h window". That arithmetic answers a question which cannot arise. Android
+ * resets the 6h counter whenever the user brings the app to the foreground, and
+ * startBackgroundKeepalive has exactly one caller - the 'background' transition,
+ * gated on an established connection, which needs an openConnection from
+ * 'active'. So every new window is preceded by a foreground visit that resets
+ * the counter, and accumulation across stretches is unreachable.
+ *
+ * The real constraint is stricter and different: overrunning needs ONE unbroken
+ * ~6 hour background stretch in which the service never stopped. Both crash
+ * events are exactly that - backgrounded with no foreground afterwards, and the
+ * process still alive 7h10m and 14h14m later. So what matters is not how many
+ * windows are armed, it is that a single window's teardown always lands. Which
+ * is why the ceiling is now enforced two ways: this timer, and a wall-clock
+ * check on wake sources that are not Choreographer-driven (see
+ * enforceKeepaliveCeiling).
  */
 const BACKGROUND_KEEPALIVE_MAX_MS = 5 * 60_000;
 
@@ -628,27 +654,25 @@ let stopLocalNotifier: (() => void) | null = null;
 let backgroundKeepaliveActive = false;
 let keepaliveGeneration = 0;
 let keepaliveCeilingTimer: ReturnType<typeof setTimeout> | null = null;
+let keepaliveStartedAtMs = 0;
 
 /** Foreground service + local notifier while backgrounded with the channel alive (Android, mode 'foreground-service'). */
 function startBackgroundKeepalive(): void {
   if (backgroundKeepaliveActive) return;
   backgroundKeepaliveActive = true;
   keepaliveGeneration += 1;
+  keepaliveStartedAtMs = Date.now();
   const generation = keepaliveGeneration;
   keepaliveCeilingTimer = setTimeout(() => {
     keepaliveCeilingTimer = null;
     if (generation !== keepaliveGeneration) return;
-    // Order is load-bearing: stop THEN close. closeConnection() does not stop
-    // the keepalive, so closing first would leave the foreground-service
-    // notification posted with no channel behind it.
-    stopBackgroundKeepalive();
-    closeConnection();
+    enforceKeepaliveCeiling();
   }, BACKGROUND_KEEPALIVE_MAX_MS);
   void import('@/notifications/foregroundService')
-    .then(({ startConnectedForegroundService }) => {
+    .then(({ setConnectedForegroundServiceDesired }) => {
       // A foreground bounce can beat the import; never start a stale service.
       if (generation !== keepaliveGeneration) return;
-      return startConnectedForegroundService();
+      setConnectedForegroundServiceDesired(true);
     })
     .catch(() => {
       // The service notification failing to post (permission denied) leaves
@@ -678,13 +702,59 @@ function stopBackgroundKeepalive(): void {
   stopLocalNotifier?.();
   stopLocalNotifier = null;
   void import('@/notifications/foregroundService')
-    .then(({ stopConnectedForegroundService }) => stopConnectedForegroundService())
+    .then(({ setConnectedForegroundServiceDesired }) => setConnectedForegroundServiceDesired(false))
     .catch(() => {
-      // Already stopped or never started; nothing to clean up.
+      // Only the module import can reject here. The stop itself is retried by
+      // the reconciler and stays owed until it lands - it is not swallowed,
+      // which is how MOBILE-3 outlived this bound in the first place.
+    });
+}
+
+/**
+ * The ceiling, checked against the wall clock instead of trusted to a timer.
+ *
+ * RN services every setTimeout from a Choreographer frame callback, so a JS
+ * timer is only as reliable as frame delivery. Rather than settle what that
+ * does on a locked phone, the ceiling is enforced from any wake source that
+ * reaches JS by another route - an inbound relay frame (the desktop rekeys
+ * roughly every two minutes) and AppState transitions. Worst case the service
+ * lives for the ceiling plus one rekey interval instead of forever.
+ *
+ * Order is load-bearing: stop THEN close. closeConnection() does not stop the
+ * keepalive, so closing first would leave the foreground-service notification
+ * posted with no channel behind it.
+ */
+function enforceKeepaliveCeiling(): void {
+  if (!backgroundKeepaliveActive) return;
+  if (Date.now() - keepaliveStartedAtMs < BACKGROUND_KEEPALIVE_MAX_MS) return;
+  stopBackgroundKeepalive();
+  closeConnection();
+}
+
+/**
+ * Both halves of the recovery, for a wake source that is not a JS timer:
+ * retire an expired keepalive, and re-issue a native stop the reconciler still
+ * owes. The second is a no-op unless a previous stop failed outright.
+ */
+function onKeepaliveWakeSource(): void {
+  enforceKeepaliveCeiling();
+  reassertForegroundServiceState();
+}
+
+function reassertForegroundServiceState(): void {
+  if (Platform.OS !== 'android') return;
+  void import('@/notifications/foregroundService')
+    .then(({ reassertConnectedForegroundService }) => reassertConnectedForegroundService())
+    .catch(() => {
+      // Nothing outstanding to retry, or the module is unavailable.
     });
 }
 
 function onAppStateChange(status: AppStateStatus): void {
+  // Before the branches: a stop the reconciler still owes has to be retried on
+  // every transition, including the ones that go on to stop the keepalive
+  // anyway. An owed stop means the native service may still be up.
+  reassertForegroundServiceState();
   if (status === 'active') {
     stopBackgroundKeepalive();
     void openConnection();
