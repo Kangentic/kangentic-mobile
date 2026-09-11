@@ -207,7 +207,8 @@ The ceiling makes the process reapable again.
 already had the timer above (it has shipped since versionCode 5), and the two crash events say
 plainly what happened: the app went to background, never returned, and the process was still alive
 7h10m and 14h14m later with the service running. RN services every `setTimeout` from a
-Choreographer frame callback, so the ceiling timer is only ever as reliable as frame delivery to a
+Choreographer frame callback (**inferred** from RN's timer internals, not measured on a device), so
+the ceiling timer is only ever as reliable as frame delivery to a
 backgrounded app. The ceiling is therefore also checked against the **wall clock**
 (`enforceKeepaliveCeiling`) from the two wake sources that reach JS by another route: the desktop's
 ~2 minute rekey, which arrives as an inbound relay frame, and a transport state change (the shape a
@@ -227,7 +228,22 @@ hour background stretch in which the service never stopped. What matters is not 
 are armed, it is that a single window's teardown always lands - which is why
 `src/notifications/foregroundService.ts` owns the native state behind one serialized reconcile
 loop, retries a stop rather than swallowing it, and issues an unconditional stop at process start
-for a service Android restarted with nothing in JS tracking it.
+for a service Android restarted with nothing in JS tracking it. Two ordering details there are
+load-bearing rather than incidental: `onAppStateChange` reasserts BEFORE its branches, because the
+`'active'` branch's `stopBackgroundKeepalive` returns early exactly when a stop is already owed;
+and the notifee runner releases a previously parked resolver before parking a new one, since RN
+services timers only while a headless task is active and a stranded one changes timer behaviour
+app-wide.
+
+**What that repair does NOT close, stated here because the doc previously read as if it did.** A
+stop that fails every attempt stays owed rather than being swallowed, but "owed" is only worth what
+the next wake source is worth - and in the MOBILE-3 shape they vanish together. Hitting the ceiling
+closes the channel, so there is no rekey; the phone never returns to the foreground, so there is no
+AppState transition; the process never dies, so the boot sweep never runs. The residual exposure is
+then the rest of the 6h window, and for all of it a "Connected to your desktop" notification keeps
+asserting a live secure channel that `closeConnection` has already torn down. Closing this properly
+needs a native alarm (an AlarmManager-backed notifee trigger). It is deliberately not built: no
+stop has been observed failing in the field, and the device probe that would show one has not run.
 
 **Not "fixing the unmount": React unmounts correctly.** This sentence used to end "fixing the
 unmount is the real repair", which named the wrong cause. Measured on 2026-08-29, six pops produce
@@ -444,7 +460,8 @@ an activity-store signal to fire from; 30s per-session-per-category cooldown, su
 foregrounded, and gated by the same per-category Settings toggle as remote push), and
 `foregroundService.ts` owns the ongoing LOW-importance connection notification, and with it the
 service's native state: callers declare a desired state and one serialized reconcile loop applies
-it, so a start and a stop can never interleave into an orphaned service (MOBILE-3).
+it, so a start and a stop can never interleave into an orphaned service (MOBILE-3). A stop that
+exhausts its retries is a named residual, not a closed case - see the keepalive section above.
 
 Taps route to the task screen via `tapRouter.ts`, differently per platform because the two carry
 task identity differently. Android reads `{ taskId, projectId, sessionId }` straight off the
