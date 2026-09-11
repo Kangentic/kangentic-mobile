@@ -481,6 +481,51 @@ describe('SubscriptionManager', () => {
     expect(sinkCalls.diffFetchFailures).toEqual([]);
   });
 
+  /**
+   * The other half of the same staleness guard: a watch that has since been
+   * RE-SCOPED rather than dropped. The Changes tab flips scope (working ->
+   * branch) while the old fetch is still in flight; when it finally rejects,
+   * the desired entry is a fresh { projectId, scope: 'branch' } object, so a
+   * comparison keyed on it (`this.desiredDiffsByTaskId.get(taskId) !==
+   * desired`) must reject the STALE 'working' closure. Without that, the late
+   * rejection would fire onDiffFetchFailed for the CURRENT (branch) watch and
+   * mark a fetch that actually succeeded as errored.
+   */
+  it('does not report a diff failure, or mark the new scope errored, for a watch that has since been re-scoped', async () => {
+    const heldWorkingRequests: CapabilityRequestMessage[] = [];
+    const { stub, manager, sinkCalls } = await harness((request) => {
+      if (request.verb === 'read-diff' && (request.payload as { scope?: string }).scope === 'working') {
+        heldWorkingRequests.push(request);
+        return null;
+      }
+      return defaultResponder(request);
+    });
+    stub.beginHandshake();
+    await flushLoopback();
+
+    manager.setDesiredDiff('task-1', { projectId: 'project-1', scope: 'working' });
+    await flushLoopback();
+    expect(heldWorkingRequests).toHaveLength(1);
+
+    // Re-scoped while the 'working' fetch is still outstanding. This issues
+    // its own subscribeDiff for 'branch', which the default responder answers
+    // successfully.
+    manager.setDesiredDiff('task-1', { projectId: 'project-1', scope: 'branch' });
+    await flushLoopback();
+    expect(sinkCalls.diffFileLists).toEqual(['task-1']);
+
+    // The stale 'working' fetch finally rejects.
+    for (const held of heldWorkingRequests) {
+      stub.send({ type: 'capability-response', requestId: held.requestId, ok: false, error: 'No worktree for task-1' });
+    }
+    await flushLoopback();
+
+    // Must not report the stale rejection, and must not disturb the
+    // already-successful 'branch' watch's state.
+    expect(sinkCalls.diffFetchFailures).toEqual([]);
+    expect(sinkCalls.diffFileLists).toEqual(['task-1']);
+  });
+
   it('removing a desired stream unsubscribes it', async () => {
     const { stub, manager, requests } = await harness();
     stub.beginHandshake();

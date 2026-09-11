@@ -20,6 +20,7 @@ import {
 import { createLoopbackPair } from '@/devsupport/loopbackTransport';
 import { StubSessionInitiator } from '@/devsupport/stubDesktopPeer';
 import { boardColumnFixture, boardTaskFixture } from '@/devsupport/desktopFixtures';
+import { isDoneRole } from '@/state/boardStore';
 import { CLAUDE_CAPTURE_SHOTS } from '@/devsupport/claudeCapture';
 import {
   playRecordedTerminal,
@@ -3438,7 +3439,7 @@ export function createMockDesktop(options: CreateMockDesktopOptions = {}): MockD
         // Done column instead of vanishing from every screen at once.
         const targetColumns = located.projectId === MOCK_PROJECT_2.id ? mockColumns2() : mockColumns();
         const targetColumn = targetColumns.find((candidate) => candidate.id === payload.targetSwimlaneId);
-        if (targetColumn?.role === 'done') {
+        if (isDoneRole(targetColumn?.role ?? null)) {
           const taskIndex = located.taskList.findIndex((candidate) => candidate.id === located.task.id);
           if (taskIndex >= 0) located.taskList.splice(taskIndex, 1);
           located.task.swimlane_id = payload.targetSwimlaneId;
