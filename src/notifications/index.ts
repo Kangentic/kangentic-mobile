@@ -29,7 +29,15 @@ export {
 // NOTE the component that performs tap navigation lives in
 // src/navigation/PendingNavigationRunner.tsx and is deliberately NOT re-exported
 // here: it pulls in React and expo-router, and this barrel is imported by
-// node-env unit tests that cannot parse them.
+// node-env unit tests that cannot parse them. Re-exporting it once made
+// tests/unit/notificationsIndex.test.ts die on `SyntaxError: Unexpected token
+// 'typeof'`, which is what this note exists to prevent a second time.
+//
+// That test reaches the barrel through `await import('@/notifications')`, so a
+// grep for `from '@/notifications'` will NOT find it and makes this comment look
+// stale. It is not. (Same dynamic-import blind spot that
+// tests/unit/imperativeRouterConfinement.test.ts exists to cover for the
+// router ban.)
 
 let initialized = false;
 
