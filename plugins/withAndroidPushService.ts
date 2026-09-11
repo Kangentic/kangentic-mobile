@@ -26,39 +26,61 @@ import { AndroidConfig, withAndroidManifest, type ConfigPlugin } from '@expo/con
  *   (mandatory on Android 14+: an FGS must declare its type or crash at
  *   startForeground time)
  */
-const PUSH_PERMISSIONS = [
+export const PUSH_PERMISSIONS = [
   'android.permission.POST_NOTIFICATIONS',
   'android.permission.FOREGROUND_SERVICE',
   'android.permission.FOREGROUND_SERVICE_DATA_SYNC',
 ];
 
-const NOTIFEE_FOREGROUND_SERVICE = 'app.notifee.core.ForegroundService';
+export const NOTIFEE_FOREGROUND_SERVICE = 'app.notifee.core.ForegroundService';
+
+/**
+ * The service type the manifest declares. Must stay equal to the
+ * FOREGROUND_SERVICE_TYPE_DATA_SYNC that foregroundService.ts passes to
+ * displayNotification: Android 14+ crashes at startForeground when the two
+ * disagree, and nothing but a test can catch that before a device does.
+ */
+export const FOREGROUND_SERVICE_TYPE = 'dataSync';
+
+/**
+ * The manifest mutation, separated from the plugin wrapper so it can be tested
+ * without a prebuild. `expo prebuild --platform android` is the only other thing
+ * that exercises this, and it asserts nothing about what came out.
+ */
+export function applyPushServiceManifest(
+  androidManifest: AndroidConfig.Manifest.AndroidManifest,
+): AndroidConfig.Manifest.AndroidManifest {
+  // ensurePermission, not addPermission: the latter pushes unconditionally, so
+  // a prebuild run over an existing android/ (which expo-cng.md notes does
+  // happen) duplicated every entry. Harmless once merged, but the test that
+  // caught it should not have to encode the duplicate as correct.
+  for (const permission of PUSH_PERMISSIONS) {
+    AndroidConfig.Permissions.ensurePermission(androidManifest, permission);
+  }
+
+  const application = AndroidConfig.Manifest.getMainApplicationOrThrow(androidManifest);
+  const services = application.service ?? [];
+  const existingService = services.find(
+    (service) => service.$?.['android:name'] === NOTIFEE_FOREGROUND_SERVICE,
+  );
+  if (existingService) {
+    existingService.$['android:foregroundServiceType'] = FOREGROUND_SERVICE_TYPE;
+  } else {
+    services.push({
+      $: {
+        'android:name': NOTIFEE_FOREGROUND_SERVICE,
+        'android:foregroundServiceType': FOREGROUND_SERVICE_TYPE,
+      },
+    });
+  }
+  application.service = services;
+
+  return androidManifest;
+}
 
 const withAndroidPushService: ConfigPlugin = (config) => {
   return withAndroidManifest(config, (manifestConfig) => {
-    const androidManifest = manifestConfig.modResults;
-
-    for (const permission of PUSH_PERMISSIONS) {
-      AndroidConfig.Permissions.addPermission(androidManifest, permission);
-    }
-
-    const application = AndroidConfig.Manifest.getMainApplicationOrThrow(androidManifest);
-    const services = application.service ?? [];
-    const existingService = services.find(
-      (service) => service.$?.['android:name'] === NOTIFEE_FOREGROUND_SERVICE,
-    );
-    if (existingService) {
-      existingService.$['android:foregroundServiceType'] = 'dataSync';
-    } else {
-      services.push({
-        $: {
-          'android:name': NOTIFEE_FOREGROUND_SERVICE,
-          'android:foregroundServiceType': 'dataSync',
-        },
-      });
-    }
-    application.service = services;
-
+    applyPushServiceManifest(manifestConfig.modResults);
     return manifestConfig;
   });
 };

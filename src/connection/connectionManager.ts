@@ -390,6 +390,15 @@ async function performOpenConnection(): Promise<void> {
   const unbindFeed = bindFeedToStores(controller.feed, subscriptions);
   const unsubscribeTransportState = controller.transport.onStateChange((state) => {
     useChannelStore.getState().setTransportState(state);
+    // The third non-Choreographer wake source, and the one that covers the most
+    // likely shape of MOBILE-3: the desktop goes away (a closed laptop), the
+    // transport drops and retries on its own backoff forever, and no rekey ever
+    // arrives again. Without this the wall-clock ceiling check has nothing left
+    // driving it and the service is back to relying on the timer alone.
+    //
+    // Deferred for the same reason the rekey listener is: this fires inside the
+    // transport's own callback, and the teardown disposes that transport.
+    queueMicrotask(onKeepaliveWakeSource);
   });
 
   // Bootstrap must eventually succeed while the session stays established.
