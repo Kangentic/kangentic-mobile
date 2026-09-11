@@ -200,6 +200,11 @@ describe('connectionManager background keepalive ceiling', () => {
     setNotificationPermissionStatus('granted');
     notifeeMocks.displayNotification.mockClear();
     notifeeMocks.stopForegroundService.mockClear();
+    // Restores the resolving implementation, not just the call history: the
+    // reassert-retry test below installs a rejecting one, and without this a
+    // failure partway through that test would leak a rejecting stop into
+    // every later test in this file (and the two describes after it).
+    notifeeMocks.stopForegroundService.mockResolvedValue(undefined);
     notifeeMocks.getNotificationSettings.mockReset();
     notifeeMocks.getNotificationSettings.mockResolvedValue({ authorizationStatus: 1 });
   });
@@ -313,6 +318,58 @@ describe('connectionManager background keepalive ceiling', () => {
       expect(stub.establishedCount).toBeGreaterThan(handshakeRoundsBefore);
       expect(getActiveConnection()).toBeNull();
       expect(notifeeMocks.stopForegroundService).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      nowSpy.mockRestore();
+    }
+  });
+
+  /**
+   * The negative case neither wall-clock test above pins. Both jump Date.now()
+   * straight to the ceiling before firing their wake source, so nothing proves
+   * enforceKeepaliveCeiling's own guard
+   * (`Date.now() - keepaliveStartedAtMs < BACKGROUND_KEEPALIVE_MAX_MS`) still
+   * points the right way. Inverting it, or dropping it outright, would tear
+   * down every backgrounded connection on the desktop's first rekey - about two
+   * minutes in, well short of the five-minute ceiling - and every other test in
+   * this file would stay green, since none of them ever rekeys this early.
+   */
+  it('does not tear the keepalive down on a desktop rekey well before the ceiling', async () => {
+    const { getActiveConnection } = await import('@/connection/connectionManager');
+    const onAppStateChange = await establishAndWarm();
+    const stub = mockDesktopSeam.stub as StubSessionInitiator;
+    const handshakeRoundsBefore = stub.establishedCount;
+    const armedAtMs = Date.now();
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(armedAtMs);
+
+    // Same split as the rekey test above: only the timer functions are faked,
+    // Date stays under the spy, and the loopback transport the rekey travels
+    // over is queueMicrotask-driven end to end.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      onAppStateChange('background');
+      await vi.advanceTimersByTimeAsync(0);
+      // Non-vacuity checkpoint: the service really is up before the rekey below.
+      expect(notifeeMocks.displayNotification).toHaveBeenCalledTimes(1);
+      expect(getActiveConnection()).not.toBeNull();
+
+      // Clearly short of the ceiling, unlike the two tests above.
+      nowSpy.mockReturnValue(armedAtMs + EXPECTED_KEEPALIVE_CEILING_MS / 2);
+      stub.beginHandshake();
+      for (let round = 0; round < 20 && stub.establishedCount === handshakeRoundsBefore; round += 1) {
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      // The loop above watches the DESKTOP stub's counter, which is the far
+      // side of the loopback from onRekey's queueMicrotask(onKeepaliveWakeSource).
+      // One more drain closes that gap so the negatives below cannot pass
+      // merely because that microtask was still queued.
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The rekey actually landed, so a still-alive connection below is not
+      // merely because the wake source never fired.
+      expect(stub.establishedCount).toBeGreaterThan(handshakeRoundsBefore);
+      expect(getActiveConnection()).not.toBeNull();
+      expect(notifeeMocks.stopForegroundService).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
       nowSpy.mockRestore();
@@ -529,6 +586,42 @@ describe('connectionManager background keepalive ceiling', () => {
 
     expect(notifeeMocks.displayNotification).not.toHaveBeenCalled();
     expect(getActiveConnection()).toBeNull();
+  });
+
+  /**
+   * The connectionManager side of the reassert wiring, not foregroundService's
+   * own retry loop (that half is pinned in isolation by foregroundService.test.ts's
+   * "retries a rejected stop" case). Every test above keeps stopForegroundService
+   * resolving, so onAppStateChange's reassertForegroundServiceState() call - the
+   * one that dynamic-imports reassertConnectedForegroundService() - is always a
+   * silent no-op here. A broken import path or a dropped call would go unnoticed.
+   */
+  it('retries a stop that failed every attempt through the real reassert wiring on the next AppState transition', async () => {
+    const { getActiveConnection } = await import('@/connection/connectionManager');
+    const onAppStateChange = await establishAndWarm();
+
+    onAppStateChange('background');
+    await waitUntil(() => notifeeMocks.displayNotification.mock.calls.length === 1, {
+      label: 'foreground service posted',
+    });
+    // Non-vacuity checkpoint: the service really is up before the stop below.
+    expect(getActiveConnection()).not.toBeNull();
+
+    notifeeMocks.stopForegroundService.mockRejectedValue(new Error('native stop failed'));
+    onAppStateChange('active');
+    await waitUntil(() => notifeeMocks.stopForegroundService.mock.calls.length === 3, {
+      label: 'all three stop attempts exhausted',
+    });
+
+    notifeeMocks.stopForegroundService.mockResolvedValue(undefined);
+    // A SECOND 'active' transition is what has to carry the retry: nothing
+    // else in this test declares a new desired state, so a 4th call can only
+    // come from reassertForegroundServiceState -> reassertConnectedForegroundService.
+    onAppStateChange('active');
+
+    await waitUntil(() => notifeeMocks.stopForegroundService.mock.calls.length === 4, {
+      label: 'stop retried through reassertForegroundServiceState',
+    });
   });
 });
 

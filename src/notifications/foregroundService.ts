@@ -110,9 +110,21 @@ export function setConnectedForegroundServiceDesired(running: boolean): void {
  * channel, so after a failed stop there are no more rekeys and the only wake
  * source left is the user returning to the app. If that never happens the stop
  * stays owed until the next process start, where stopOrphanedForegroundServiceAtBoot
- * catches it. Closing that properly needs a native alarm (an AlarmManager-backed
- * notifee trigger), which is deliberately not built until a device probe shows
- * it is needed.
+ * catches it.
+ *
+ * Note what that fallback is worth in the case this module was written for. The
+ * MOBILE-3 symptom is a process that never restarts (alive 7h10m and 14h14m),
+ * and there every wake source goes at once: no channel, so no rekey; no
+ * foreground visit, so no AppState transition; no process death, so no boot
+ * sweep. "Owed until the next launch" is therefore not a bound on the exposure
+ * in the only scenario that matters - the residual is the rest of the 6h budget
+ * window, and the second consequence is a "Connected to your desktop"
+ * notification asserting a live secure channel for all of it, after
+ * closeConnection has already torn that channel down.
+ *
+ * Closing this properly needs a native alarm (an AlarmManager-backed notifee
+ * trigger), which is deliberately not built until a device probe shows a stop
+ * actually failing in the field. Every attempt rejecting is unobserved so far.
  */
 export function reassertConnectedForegroundService(): void {
   if (!stopFailed) return;
@@ -128,13 +140,25 @@ export function reassertConnectedForegroundService(): void {
  * issuing it once costs nothing when there is no service to stop.
  */
 export function stopOrphanedForegroundServiceAtBoot(): void {
+  // Parked in the same slot the reconcile loop uses, so a keepalive declared
+  // while this native call is still in flight queues behind it instead of
+  // racing it. Without that the sweep is the one native call in this module
+  // nothing serializes: an early background transition could land
+  // displayNotification underneath it and lose the service it just started,
+  // which is the interleaving the whole module exists to prevent.
+  if (reconciling) return;
   // Through the same stop the reconciler uses, not a bare native call: that one
   // also releases a parked runner resolver, so the headless task cannot outlive
   // the service it belongs to.
-  void stopConnectedForegroundService().catch(() => {
-    // Nothing was running, or notifee is not ready yet. Either way the normal
-    // keepalive path owns the service from here.
-  });
+  reconciling = stopConnectedForegroundService()
+    .catch(() => {
+      // Nothing was running, or notifee is not ready yet. Either way the normal
+      // keepalive path owns the service from here.
+    })
+    .finally(() => {
+      reconciling = null;
+      if (hasOutstandingWork() && !stopFailed) kickReconcileLoop();
+    });
 }
 
 function hasOutstandingWork(): boolean {
@@ -172,6 +196,15 @@ async function runReconcileLoop(): Promise<void> {
     }
     if (await attemptStop()) {
       appliedSequence = sequence;
+      continue;
+    }
+    if (sequence !== desiredSequence) {
+      // A newer declaration landed while those attempts were failing, and it
+      // supersedes this stop. Loop again and apply it - a start if the app
+      // bounced back to the background, a fresh set of attempts if it is
+      // another stop. Falling through to mark the failure instead would strand
+      // that declaration outright: the re-kick in kickReconcileLoop is gated on
+      // !stopFailed, so nothing would apply it until the next wake source.
       continue;
     }
     // Every attempt failed. Leave the stop owed so reassert retries it, and
