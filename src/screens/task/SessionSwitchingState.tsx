@@ -29,16 +29,28 @@ export function SessionSwitchingState({ onViewChanges }: SessionSwitchingStatePr
   return (
     <View
       testID="session-switching-state"
-      style={[styles.overlay, { backgroundColor: theme.colors.background }]}
-      // Decorative over a live frame: announce the state, swallow taps meant
-      // for a session that is no longer there.
-      accessibilityRole="progressbar"
-      accessibilityLabel="Switching to the new session for this task"
+      style={styles.overlay}
+      // Modal to VoiceOver, so it cannot reach the covered pane behind the
+      // scrim. Android has no equivalent on the overlay, so SessionScreen
+      // hides the pane subtree there; the two together are the full fix.
+      accessibilityViewIsModal
     >
-      <Stack gap="xs" style={styles.content}>
+      {/* The scrim is its OWN layer rather than opacity on this container:
+          a container opacity fades the label and the button with it, and they
+          sit over a live frame of arbitrary colour, which is where contrast
+          goes. Painted first, so the content below it stacks on top. */}
+      <View
+        style={[StyleSheet.absoluteFill, styles.scrim, { backgroundColor: theme.colors.background }]}
+        pointerEvents="none"
+      />
+      {/* Announced as a live region rather than given a `progressbar` role on
+          the container: that role made this whole overlay one atomic stop, and
+          a screen reader could then miss the only button out of it. The
+          visible text is the announcement. */}
+      <Stack gap="xs" style={styles.content} accessibilityLiveRegion="polite">
         <Text variant="title">Switching session</Text>
         <Text variant="body" color="secondary" style={styles.caption}>
-          The desktop is starting a new session for this task.
+          The desktop is starting a new session.
         </Text>
         {/* The one way out while the panes are covered. A swap can run the
             whole grace window on a slow machine, and the work so far is still
@@ -72,10 +84,14 @@ const styles = StyleSheet.create({
      * and this overlay bleeds through the gaps.
      */
     zIndex: 2,
-    /**
-     * The last frame stays readable underneath. A scrim, not a curtain: the
-     * point is that the session view is still there and is about to repaint.
-     */
+  },
+  /**
+   * The last frame stays readable underneath. A scrim, not a curtain: the
+   * point is that the session view is still there and is about to repaint.
+   * Opacity lives HERE, on the background layer alone, so the title, caption
+   * and button above it keep full contrast.
+   */
+  scrim: {
     opacity: 0.92,
   },
   content: {

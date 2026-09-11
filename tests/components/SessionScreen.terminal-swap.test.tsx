@@ -3,7 +3,7 @@ import { act, render, screen, waitFor } from '@testing-library/react-native';
 import { ThemeProvider } from '@/components';
 import { SessionScreen } from '@/screens/task/SessionScreen';
 import { decodeHostMessage } from '@/terminal/terminalBridge';
-import { getTerminalFeedStats, resetTerminalFeed, retainTerminal, seedScrollback } from '@/state/terminalFeed';
+import { getTerminalFeedStats, hasBufferedFrame, resetTerminalFeed, retainTerminal, seedScrollback } from '@/state/terminalFeed';
 import { useActivityStore } from '@/state/activityStore';
 import { useBoardStore } from '@/state/boardStore';
 import { useSettingsStore } from '@/state/settingsStore';
@@ -277,5 +277,47 @@ describe('SessionScreen terminal pane across a session swap', () => {
     });
 
     expect(postsCarrying('ALREADY HERE')).toHaveLength(1);
+  });
+
+  /**
+   * The swap effect's gate (`if (sessionChanged && !cleanFeedChanged &&
+   * !hasBufferedFrame(sessionId)) return;`) is deliberately split into two
+   * independently-tracked halves: a SESSION swap holds an empty-ring re-init
+   * back until the successor's seed arrives (the tests above), but a
+   * CLEAN-FEED flip must always post, because the flag only takes effect at
+   * init - skipping it would leave the WebView's parser stuck in the wrong
+   * mode. Folding both into one shared `!hasBufferedFrame` gate (e.g.
+   * `if ((sessionChanged || cleanFeedChanged) && !hasBufferedFrame(...))
+   * return;`) would swallow this init exactly when the ring is empty, which is
+   * the ordinary case for a session whose agent has no structured transcript.
+   */
+  it('re-inits on a clean-feed flip even with an empty ring, on the SAME session', async () => {
+    seedTaskWithSession('sess-a');
+    render(
+      <ThemeProvider>
+        <SessionScreen />
+      </ThemeProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId('terminal-webview')).toBeTruthy());
+    postFromWebView(JSON.stringify({ type: 'ready' }));
+
+    // The precondition that makes this case distinct from the swap tests
+    // above: nothing has ever seeded this session's ring.
+    expect(hasBufferedFrame('sess-a')).toBe(false);
+
+    const postCountBeforeFlip = webViewMock.__postMessageMock.mock.calls.length;
+
+    // The window lands empty: selectChatLens flips to 'reading-view', which
+    // is what SessionScreen forwards to TerminalTab as cleanFeedEnabled - no
+    // session change at all.
+    act(() => {
+      useTranscriptStore.getState().retainSession('sess-a');
+      useTranscriptStore.getState().applyWindow('sess-a', { revision: 1, totalEntries: 0, startIndex: 0, entries: [] });
+    });
+
+    const cleanFeedInitsSinceFlip = decodedPosts()
+      .slice(postCountBeforeFlip)
+      .filter((message) => message !== null && message.type === 'init' && message.cleanFeed === true);
+    expect(cleanFeedInitsSinceFlip).toHaveLength(1);
   });
 });

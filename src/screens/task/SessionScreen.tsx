@@ -238,21 +238,39 @@ export function SessionScreen(): React.JSX.Element {
   // renders from it. As state it is a setState inside an effect - a cascading
   // render for no visible change, and an eslint error.
   const archiveFetchedForKeyRef = useRef<string | null>(null);
+  // Whether a page for this project is ALREADY in flight, from this screen or
+  // any other (BoardScreen fetches the same list). loadArchivedTasks
+  // early-returns in that case - silently, resolving rather than throwing - so
+  // firing into it would burn this key's one look on a request that never
+  // happened, and the `.catch` below would not fire to give it back. That
+  // strands a completed task under the ended overlay for the life of the
+  // screen, which is the exact failure the two-key design above exists to
+  // prevent. The in-flight page was also fetched BEFORE this key's evidence
+  // existed, so it can legitimately come back without the task; waiting for it
+  // to land and re-running is both correct and the only way to get a look that
+  // reflects the archive row.
+  const archiveFetchInFlight = useBoardStore((state) =>
+    projectId !== null ? (state.archivedByProjectId[projectId]?.loading ?? false) : false,
+  );
   useEffect(() => {
     if (archiveFetchKey === null || projectId === null) return;
     if (archiveFetchedForKeyRef.current === archiveFetchKey) return;
-    const fetchedForKey = archiveFetchKey;
-    archiveFetchedForKeyRef.current = fetchedForKey;
+    if (archiveFetchInFlight) return;
+    archiveFetchedForKeyRef.current = archiveFetchKey;
     void loadArchivedTasks({ projectId }).catch(() => {
       // Offline, or the desktop refused: the screen stays on the ended state,
-      // which is the honest answer when we cannot tell that it completed.
+      // which is the honest answer when we cannot tell that it completed. The
+      // task leaving the board still changes the key, so the decisive second
+      // look survives a failed first one.
       //
-      // Give the slot back, though. A failed look must not consume the one
-      // chance this key had, or a single dropped connection strands a
-      // completed task under the ended overlay for the life of the screen.
-      if (archiveFetchedForKeyRef.current === fetchedForKey) archiveFetchedForKeyRef.current = null;
+      // The key is NOT given back here. A failure sets `loading` false on its
+      // way out, which is a dependency of this effect, so freeing the key
+      // would re-run it, re-fetch, fail again and spin - a tight retry loop
+      // for as long as the desktop stays unreachable. (Before `loading` was a
+      // dependency nothing could re-run this effect under an unchanged key, so
+      // giving it back had no effect either way.)
     });
-  }, [archiveFetchKey, projectId]);
+  }, [archiveFetchKey, projectId, archiveFetchInFlight]);
   // Select the STORED slice and derive from it: findArchivedTaskById builds a
   // fresh object per call, so calling it inside the selector hands
   // useSyncExternalStore a new snapshot every render and loops it.
@@ -361,6 +379,8 @@ export function SessionScreen(): React.JSX.Element {
   const overlaysYieldToChanges = mode === 'changes';
   const showSwitchingState = sessionSwitching && !overlaysYieldToChanges;
   const showEndedState = sessionEnded && !sessionSwitching && !overlaysYieldToChanges;
+  // Either overlay occludes the panes, visually and for assistive technology.
+  const overlayCoversPanes = showSwitchingState || showEndedState;
   // The footer comes back with them, because in `changes` mode it is only the
   // mode pill (no composer, no quick keys - see SessionInputBar). Without it
   // Changes is a one-way trip out of the ended state with nothing but the
@@ -401,7 +421,20 @@ export function SessionScreen(): React.JSX.Element {
               The overlay now sets zIndex: 2 as well, so the fix holds under
               either reading; this keeps the next overlay added over these
               panes out of the same trap. */}
-          <View style={styles.flex} collapsable={false}>
+          {/* While either overlay covers the panes, take ALL THREE out of the
+              accessibility tree. Each pane's own props below follow `mode`
+              alone, so the pane the user was last looking at stays exposed
+              underneath the scrim: a screen reader swipes straight past the
+              overlay into a session that is visually gone and cannot be
+              touched. This is the assistive-technology half of the same
+              occlusion the overlay's zIndex handles visually, and it needs
+              both platforms' props because neither one covers the other. */}
+          <View
+            style={styles.flex}
+            collapsable={false}
+            accessibilityElementsHidden={overlayCoversPanes}
+            importantForAccessibility={overlayCoversPanes ? 'no-hide-descendants' : 'auto'}
+          >
             <View
               style={[styles.pane, mode === 'terminal' ? styles.paneVisible : styles.paneHidden]}
               pointerEvents={mode === 'terminal' ? 'auto' : 'none'}

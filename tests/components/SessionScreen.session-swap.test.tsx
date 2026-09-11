@@ -1,6 +1,6 @@
 import React from 'react';
 import { StyleSheet } from 'react-native';
-import { act, fireEvent, render, screen } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import { ThemeProvider } from '@/components';
 import { SessionScreen } from '@/screens/task/SessionScreen';
 import { useActivityStore } from '@/state/activityStore';
@@ -78,13 +78,25 @@ jest.mock('@/screens/task/SessionInputBar', () => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- lazy require, evaluated inside the mock factory
   const ReactModule = require('react');
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- lazy require, evaluated inside the mock factory
-  const { View } = require('react-native');
+  const { Pressable, View } = require('react-native');
   return {
     __esModule: true,
-    SessionInputBar: (props: { sessionId: string | null; mode: string }) =>
+    // The Pressable child is additive: the outer View keeps the same testID
+    // and accessibilityLabel every other test in this suite reads, and this
+    // is the only stub in the suite that needs a way back to terminal mode -
+    // the overlay round-trip tests press it to prove showSwitchingState /
+    // showEndedState are a pure DERIVATION of mode, not a one-way latch.
+    SessionInputBar: (props: { sessionId: string | null; mode: string; onModeChange: (mode: string) => void }) =>
       props.sessionId === null
         ? null
-        : ReactModule.createElement(View, { testID: 'stub-session-input-bar', accessibilityLabel: props.mode }),
+        : ReactModule.createElement(
+            View,
+            { testID: 'stub-session-input-bar', accessibilityLabel: props.mode },
+            ReactModule.createElement(Pressable, {
+              testID: 'session-mode-terminal',
+              onPress: () => props.onModeChange('terminal'),
+            }),
+          ),
   };
 });
 
@@ -445,6 +457,35 @@ describe('SessionScreen session binding', () => {
   });
 
   /**
+   * The escape hatch above only proves the overlay CAN be dismissed - a
+   * regression that latched "dismissed" into its own state (rather than
+   * deriving showEndedState from `mode` alone, as `overlaysYieldToChanges`
+   * does) would pass it just as well. Round-tripping the mode back to
+   * terminal is what actually exercises the derivation.
+   *
+   * This uses the desktop-ended-push route (session_id stays 'sess-a')
+   * rather than seedTaskWithSession(null): a session that goes fully null
+   * renders no SessionInputBar at all (see the test above), so there is no
+   * mode pill to press on the way back.
+   */
+  it('brings the ended overlay back once the mode returns to terminal', () => {
+    mockParams = { taskId: 'task-1', sessionId: 'sess-a' };
+    seedTaskWithSession('sess-a');
+    renderSessionScreen();
+    act(() => {
+      pushSessionEnded('sess-a');
+    });
+    expect(screen.getByTestId('session-ended-state')).toBeTruthy();
+
+    fireEvent.press(screen.getByTestId('session-ended-view-changes'));
+    expect(screen.queryByTestId('session-ended-state')).toBeNull();
+
+    fireEvent.press(screen.getByTestId('session-mode-terminal'));
+
+    expect(screen.getByTestId('session-ended-state')).toBeTruthy();
+  });
+
+  /**
    * Under the sessions projection an ended task is dropped from the board, so
    * MoveTaskScreen could not locate it either: the Move button hides while
    * View changes stays (diffs outlive the session).
@@ -494,7 +535,15 @@ describe('SessionScreen session binding', () => {
 
     const overlayZIndex = StyleSheet.flatten(screen.getByTestId('session-ended-state').props.style)?.zIndex;
     // Terminal is the default mode, so that is the pane carrying paneVisible.
-    const visiblePaneZIndex = StyleSheet.flatten(screen.getByTestId('session-pane-terminal').props.style)?.zIndex;
+    //
+    // `includeHiddenElements` because the assertion is about STACKING, and the
+    // pane is deliberately hidden from the accessibility tree while an overlay
+    // covers it (SessionScreen's overlayCoversPanes). It is still mounted and
+    // still painting underneath, which is the whole reason the zIndex contest
+    // it is in here matters.
+    const visiblePaneZIndex = StyleSheet.flatten(
+      screen.getByTestId('session-pane-terminal', { includeHiddenElements: true }).props.style,
+    )?.zIndex;
 
     // Both must be real numbers: an undefined zIndex on either side is the bug
     // (an implicit auto lost the contest), not a passing comparison.
@@ -616,6 +665,10 @@ describe('SessionScreen across a column move', () => {
     // Still bound to the outgoing session, so the pill is the way back - and
     // going back to terminal must bring the scrim with it.
     expect(screen.getByTestId('stub-session-input-bar').props.accessibilityLabel).toBe('changes');
+
+    fireEvent.press(screen.getByTestId('session-mode-terminal'));
+
+    expect(screen.getByTestId('session-switching-state')).toBeTruthy();
   });
 
   it('clears the switching state when the successor session binds', () => {
@@ -675,6 +728,30 @@ describe('SessionScreen across a column move', () => {
 
     act(() => {
       moveTaskToColumn('lane-todo');
+    });
+    act(() => {
+      pushSessionEnded('sess-a');
+    });
+
+    expect(screen.queryByTestId('session-switching-state')).toBeNull();
+    expect(screen.getByTestId('session-ended-state')).toBeTruthy();
+  });
+
+  /**
+   * The mirror case: a move to a Done-role column also promises no successor
+   * (the task is archived and its worktree deleted), so the swap window must
+   * never open either. Unlike the two Done tests further down, this one
+   * performs a REAL swimlane change (starts in Doing) and pushes
+   * `session-ended`, which is exactly the combination that opens the window
+   * when the `!isDoneRole(locatedColumnRole)` clause is missing.
+   */
+  it('shows the ended state immediately for a move to the Done column, never the switching state', () => {
+    // Starts in Doing, so the move to Done is a real column change.
+    seedRoledBoard('sess-a', 'lane-doing');
+    renderSessionScreen();
+
+    act(() => {
+      moveTaskToColumn('lane-done');
     });
     act(() => {
       pushSessionEnded('sess-a');
@@ -750,6 +827,154 @@ describe('SessionScreen across a column move', () => {
     });
     expect(loadArchivedTasksMock).toHaveBeenCalledTimes(2);
     expect(loadArchivedTasksMock).toHaveBeenLastCalledWith({ projectId: 'project-1' });
+  });
+
+  /**
+   * The swallowed-in-flight-fetch bug this branch fixed: loadArchivedTasks
+   * (src/connection/actions.ts) silently early-returns - resolves, never
+   * throws - when a page for the project is ALREADY in flight (BoardScreen
+   * fetches the same list). The `:located` key's page can still be in flight
+   * when the task leaves the board and the key flips to `:gone`; the fix is
+   * an `archiveFetchInFlight` selector that holds the `:gone` look off until
+   * the in-flight page LANDS, so it gets its own real fetch instead of firing
+   * into the guard and being swallowed.
+   *
+   * The mock below mirrors loadArchivedTasks' own early-return contract
+   * (checking `archivedByProjectId[projectId]?.loading` itself) rather than
+   * merely resolving, because a fake that does not reproduce the guard cannot
+   * tell the fixed and unfixed effect apart - both fire the same NUMBER of
+   * calls at the mock either way. What differs is whether the second call
+   * lands while the first is still loading (swallowed, no resolver) or after
+   * it clears (a real fetch, with a resolver) - so the assertions here are on
+   * live resolvers and the eventual redirect, not the raw call count.
+   */
+  it('gives the :gone key its own look once the in-flight :located page lands, instead of losing it to the guard', async () => {
+    interface PendingArchivePage {
+      projectId: string;
+      archivedTasks: ReturnType<typeof boardTaskFixture>[];
+      archivedTotalCount: number;
+      summariesByTaskId: Record<string, never>;
+    }
+    const archivedPageResolvers: ((page: PendingArchivePage) => void)[] = [];
+    loadArchivedTasksMock.mockImplementation(({ projectId }: { projectId: string }) => {
+      const alreadyHeld = useBoardStore.getState().archivedByProjectId[projectId];
+      // The real contract: a page already in flight is a silent no-op.
+      if (alreadyHeld?.loading) return Promise.resolve();
+      useBoardStore.getState().setArchivedLoading(projectId, true);
+      return new Promise<void>((resolve) => {
+        archivedPageResolvers.push((page) => {
+          useBoardStore.getState().applyArchivedPage(page, { append: false });
+          resolve();
+        });
+      });
+    });
+
+    try {
+      seedRoledBoard('sess-a');
+      renderSessionScreen();
+
+      // The `:located` key's fetch: the card lands in Done optimistically.
+      act(() => {
+        moveTaskToColumn('lane-done');
+      });
+      expect(loadArchivedTasksMock).toHaveBeenCalledTimes(1);
+      expect(archivedPageResolvers).toHaveLength(1);
+
+      // The task leaves the board while that fetch is STILL in flight: the
+      // key flips to `:gone`. The in-flight guard must hold this off - no
+      // second live resolver yet, whether or not the mock's own contract
+      // also counts a swallowed call.
+      act(() => {
+        seedBoardWithoutTask();
+      });
+      expect(archivedPageResolvers).toHaveLength(1);
+
+      // The in-flight `:located` page lands, without the task (it was fetched
+      // before the archive row existed).
+      act(() => {
+        archivedPageResolvers[0]({
+          projectId: 'project-1',
+          archivedTasks: [],
+          archivedTotalCount: 0,
+          summariesByTaskId: {},
+        });
+      });
+
+      // The decisive second look: the `:gone` key gets its OWN real fetch now
+      // that the guard has cleared, not a call swallowed by the contract.
+      await waitFor(() => expect(archivedPageResolvers).toHaveLength(2));
+      expect(mockReplace).not.toHaveBeenCalled();
+
+      // That second fetch lands WITH the archived task.
+      act(() => {
+        archivedPageResolvers[1]({
+          projectId: 'project-1',
+          archivedTasks: [
+            boardTaskFixture({ id: 'task-1', session_id: null, archived_at: '2026-09-11T00:00:00.000Z' }),
+          ],
+          archivedTotalCount: 1,
+          summariesByTaskId: {},
+        });
+      });
+
+      await waitFor(() =>
+        expect(mockReplace).toHaveBeenCalledWith({
+          pathname: '/completed-task',
+          params: { taskId: 'task-1', projectId: 'project-1' },
+        }),
+      );
+    } finally {
+      loadArchivedTasksMock.mockReset();
+      loadArchivedTasksMock.mockResolvedValue(undefined);
+    }
+  });
+
+  /**
+   * A failure sets `loading` back to false on its way out (the real
+   * loadArchivedTasks does this too), and `archiveFetchInFlight` is a
+   * dependency of the fetch effect - so `loading` clearing re-runs it. The
+   * key must stay consumed for a FAILED look, not just a successful one: an
+   * implementation that frees the ref inside the `.catch` (the natural thing
+   * to try, and the shape the fix briefly took) re-fires into the SAME key
+   * every time the mock's own async failure clears `loading`, which is a
+   * tight retry loop for as long as the desktop stays unreachable.
+   */
+  it('does not spin: a failed fetch does not re-issue for the same key once loading clears', async () => {
+    loadArchivedTasksMock.mockImplementation(({ projectId }: { projectId: string }) => {
+      const alreadyHeld = useBoardStore.getState().archivedByProjectId[projectId];
+      if (alreadyHeld?.loading) return Promise.resolve();
+      useBoardStore.getState().setArchivedLoading(projectId, true);
+      // A genuine async gap (not a same-tick set-true-then-false) so `loading`
+      // clearing is an OBSERVABLE transition the effect's dependency list can
+      // react to - exactly like the real verb round trip failing.
+      return new Promise<void>((_resolve, reject) => {
+        setTimeout(() => {
+          useBoardStore.getState().setArchivedLoading(projectId, false);
+          reject(new Error('offline (probe)'));
+        }, 5);
+      });
+    });
+
+    try {
+      seedRoledBoard('sess-a');
+      renderSessionScreen();
+
+      act(() => {
+        moveTaskToColumn('lane-done');
+      });
+      expect(loadArchivedTasksMock).toHaveBeenCalledTimes(1);
+
+      // Long enough for several 5ms failure/retry windows to have run if the
+      // effect were re-firing into the same key.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      });
+
+      expect(loadArchivedTasksMock).toHaveBeenCalledTimes(1);
+    } finally {
+      loadArchivedTasksMock.mockReset();
+      loadArchivedTasksMock.mockResolvedValue(undefined);
+    }
   });
 
   it('does not redirect a task that is still on the board', () => {
