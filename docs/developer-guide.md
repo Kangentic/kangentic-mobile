@@ -1855,8 +1855,8 @@ them are not bugs**. Getting this wrong invalidates every conclusion below, so s
   socket instead. A real remote push needs the channel down, which means waiting out the
   five-minute `BACKGROUND_KEEPALIVE_MAX_MS` ceiling. **Wait it out with the screen ON.** The
   ceiling's timer half rides a Choreographer frame callback, and the wall-clock half only fires
-  on a wake source that reaches JS - the desktop's ~2 minute rekey, or an AppState transition. On
-  a dark, idle phone the teardown can take the ceiling plus a rekey interval.
+  on a wake source that reaches JS - the desktop's ~2 minute rekey, or a transport state change.
+  On a dark, idle phone the teardown can take the ceiling plus a rekey interval.
 
 **Checking the foreground service directly**, which is the one reading that does not depend on
 what JS believes: `adb shell dumpsys activity services com.kangentic.mobile`. It reports the

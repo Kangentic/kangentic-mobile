@@ -148,6 +148,64 @@ describe('foregroundService', () => {
     await vi.waitFor(() => expect(service.stopForegroundService).toHaveBeenCalledTimes(4));
   });
 
+  /**
+   * A start declared while a failing stop is still retrying used to be
+   * stranded: attemptStop() exhausting its three attempts set stopFailed and
+   * returned, and kickReconcileLoop's re-kick is gated on !stopFailed, so the
+   * pending true declaration sat unapplied until some later external wake
+   * source called reassertConnectedForegroundService(). The fix is the
+   * `sequence !== desiredSequence` check right after attemptStop() fails: a
+   * newer declaration landed while those attempts were failing, so the loop
+   * continues and applies it instead of marking the stop failed.
+   *
+   * Every stop attempt below is a hand-controlled promise, not a plain
+   * mockRejectedValue: rejecting all three synchronously would settle them
+   * within the same microtask tick, and the true declaration could never
+   * actually land while attemptStop() was still awaiting one of them.
+   *
+   * Deleting the `if (sequence !== desiredSequence) { continue; }` block makes
+   * the second displayNotification call never arrive, and this test times out
+   * instead.
+   */
+  it('applies a start declared while a failing stop is still retrying, without an external reassert', async () => {
+    const service = await loadForegroundService();
+    service.setConnectedForegroundServiceDesired(true);
+    await vi.waitFor(() => expect(service.displayNotification).toHaveBeenCalledTimes(1));
+
+    const pendingStopAttempts: ((reason: Error) => void)[] = [];
+    service.stopForegroundService.mockImplementation(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          pendingStopAttempts.push(reject);
+        }),
+    );
+
+    service.setConnectedForegroundServiceDesired(false);
+    await flushMicrotasks();
+    expect(pendingStopAttempts).toHaveLength(1);
+
+    // Fail the first attempt and let the loop start its second.
+    pendingStopAttempts[0](new Error('native stop failed'));
+    await flushMicrotasks();
+    expect(pendingStopAttempts).toHaveLength(2);
+
+    // THE interleaving under test: a fresh start declared while the second of
+    // three retry attempts is genuinely still pending.
+    service.setConnectedForegroundServiceDesired(true);
+
+    // Fail the second and third attempts so attemptStop() exhausts all three
+    // and the reconcile loop reaches the branch under test.
+    pendingStopAttempts[1](new Error('native stop failed'));
+    await flushMicrotasks();
+    expect(pendingStopAttempts).toHaveLength(3);
+    pendingStopAttempts[2](new Error('native stop failed'));
+
+    // No call to service.reassertConnectedForegroundService anywhere in this
+    // test: the start has to apply on its own, inside the same reconcile loop
+    // that was already running the failing stop.
+    await vi.waitFor(() => expect(service.displayNotification).toHaveBeenCalledTimes(2));
+  });
+
   it('releases a parked runner promise before parking the next one', async () => {
     const service = await loadForegroundService();
     service.registerForegroundServiceRunner();
@@ -172,6 +230,38 @@ describe('foregroundService', () => {
     void runner(notification);
     await flushMicrotasks();
     expect(firstRunnerSettled).toBe(true);
+  });
+
+  it('queues a keepalive declared while the boot sweep is still in flight', async () => {
+    const service = await loadForegroundService();
+    let resolveStop: () => void = () => undefined;
+    service.stopForegroundService.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveStop = resolve;
+        }),
+    );
+
+    service.stopOrphanedForegroundServiceAtBoot();
+    await flushMicrotasks();
+    service.setConnectedForegroundServiceDesired(true);
+    await flushMicrotasks();
+
+    // THE assertion. The boot sweep is the one native call in the module that
+    // does not arrive through a desired-state declaration, so nothing sequences
+    // it unless it parks in the same slot the reconcile loop uses. Unparked, the
+    // start below lands underneath a stop that has not returned yet and loses
+    // the service it just posted - the interleaving this module exists to
+    // prevent, reached from the one direction the sequence counters cannot see.
+    expect(service.displayNotification).not.toHaveBeenCalled();
+
+    resolveStop();
+
+    // And it is queued, not dropped: the sweep's own completion has to hand the
+    // loop back its outstanding work. Deleting the re-kick from the sweep's
+    // finally makes this time out rather than fail fast, since the declaration
+    // is simply never applied.
+    await vi.waitFor(() => expect(service.displayNotification).toHaveBeenCalledTimes(1));
   });
 
   it('finishes the runner immediately for a service nothing asked for', async () => {

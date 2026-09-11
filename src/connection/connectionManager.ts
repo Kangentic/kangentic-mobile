@@ -684,8 +684,10 @@ function startBackgroundKeepalive(): void {
       setConnectedForegroundServiceDesired(true);
     })
     .catch(() => {
-      // The service notification failing to post (permission denied) leaves
-      // a plain background socket; the OS may reap it sooner, nothing worse.
+      // Only the module import can reject here: the declaration itself is
+      // synchronous and does not throw. A notification that fails to post
+      // (permission denied) is caught and reasoned about inside the reconcile
+      // loop, which is the only place that awaits the native call.
     });
   void import('@/notifications/localNotifier')
     .then(({ startLocalNotifier }) => {
@@ -722,12 +724,19 @@ function stopBackgroundKeepalive(): void {
 /**
  * The ceiling, checked against the wall clock instead of trusted to a timer.
  *
- * RN services every setTimeout from a Choreographer frame callback, so a JS
- * timer is only as reliable as frame delivery. Rather than settle what that
- * does on a locked phone, the ceiling is enforced from any wake source that
- * reaches JS by another route - an inbound relay frame (the desktop rekeys
- * roughly every two minutes) and AppState transitions. Worst case the service
- * lives for the ceiling plus one rekey interval instead of forever.
+ * RN services every setTimeout from a Choreographer frame callback (INFERRED
+ * from RN's JSTimers/Timing internals, not measured on a device), so a JS timer
+ * is only as reliable as frame delivery. Rather than settle what that does on a
+ * locked phone, the ceiling is enforced from the two wake sources that reach JS
+ * by another route: an inbound relay frame (the desktop rekeys roughly every
+ * two minutes) and a transport state change. Worst case the service lives for
+ * the ceiling plus one rekey interval instead of forever.
+ *
+ * Deliberately NOT an AppState transition, though onAppStateChange does drive
+ * the other half of the recovery (reassertForegroundServiceState). A ceiling
+ * check there would be dead code: the only transition that can arrive with the
+ * keepalive still armed is 'active', and that branch already stops the
+ * keepalive outright, ceiling or no ceiling.
  *
  * Order is load-bearing: stop THEN close. closeConnection() does not stop the
  * keepalive, so closing first would leave the foreground-service notification
@@ -857,10 +866,15 @@ export function reconnectNow(intent: ConnectionTeardownIntent = 'stay-silent'): 
   // closeConnection() does not own the keepalive, so this has to. Without it a
   // ceiling timer armed by an earlier background would still be holding the OLD
   // generation, and would fire against the connection opened just below - a
-  // teardown of a live foreground session five minutes later. Today's callers
-  // are all foreground taps, and the 'active' transition has already stopped
-  // the keepalive by then, so this is closing the invariant rather than fixing
-  // a reachable bug.
+  // teardown of a live foreground session five minutes later.
+  //
+  // This is load-bearing, not merely defensive, and the comment used to say
+  // otherwise ("today's callers are all foreground taps"). They are not:
+  // handleDesktopRevocation reaches here through unpairLocally, and a revoke
+  // goodbye is an inbound relay frame - which is precisely the thing that DOES
+  // run JS on a backgrounded phone, the same premise the keepalive ceiling's
+  // rekey wake source rests on. So a revocation can arrive with the keepalive
+  // live, and this line is what retires it.
   stopBackgroundKeepalive();
   closeConnection(intent);
   void openConnection();

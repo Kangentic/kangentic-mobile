@@ -209,9 +209,12 @@ plainly what happened: the app went to background, never returned, and the proce
 7h10m and 14h14m later with the service running. RN services every `setTimeout` from a
 Choreographer frame callback, so the ceiling timer is only ever as reliable as frame delivery to a
 backgrounded app. The ceiling is therefore also checked against the **wall clock**
-(`enforceKeepaliveCeiling`) from wake sources that reach JS by another route: the desktop's ~2
-minute rekey, which arrives as an inbound relay frame, and AppState transitions. Worst case the
-service lives for the ceiling plus one rekey interval rather than forever.
+(`enforceKeepaliveCeiling`) from the two wake sources that reach JS by another route: the desktop's
+~2 minute rekey, which arrives as an inbound relay frame, and a transport state change (the shape a
+closed laptop takes, where the socket drops and retries on its own backoff and no rekey ever
+arrives again). Worst case the service lives for the ceiling plus one rekey interval rather than
+forever. Returning to the foreground needs no ceiling check of its own: the `'active'` transition
+stops the keepalive outright.
 
 **Correction, same issue: the budget does not accumulate across background stretches.** This
 section and `connectionManager.ts` both used to reason about exhausting the 6h budget over many
