@@ -21,6 +21,7 @@ import {
   setRetentionProbeVariant,
   useRetentionProbeVariant,
 } from '@/devsupport/retentionProbe';
+import { nseProbeEnabled, readNseProbeResult, seedNseProbe } from '@/devsupport/nseProbe';
 import { crashNatively, crashTestEnabled, reportHandledTestError, throwTestError } from '@/observability/crashReporting';
 import { useChannelStore } from '@/state/channelStore';
 import {
@@ -193,6 +194,31 @@ export function SettingsScreen(): React.JSX.Element {
   const relayUrl = useChannelStore((state) => state.relayUrl);
   const pairedState = useChannelStore((state) => state.pairedState);
   const retentionProbeVariant = useRetentionProbeVariant();
+  // The NSE probe rows (build-ios.yml `nse_probe`). A failure's message is
+  // rendered on purpose: an errSecMissingEntitlement on the runner's failure
+  // screenshot reads differently from a decrypt failure, which is the point.
+  const [nseProbeSeedOutcome, setNseProbeSeedOutcome] = useState<
+    { kind: 'seeded'; permissionGranted: boolean } | { kind: 'failed'; message: string } | null
+  >(null);
+  const [nseProbeResult, setNseProbeResult] = useState<string | null>(null);
+
+  const runNseProbeSeed = (): void => {
+    setNseProbeSeedOutcome(null);
+    seedNseProbe()
+      .then((outcome) => setNseProbeSeedOutcome({ kind: 'seeded', permissionGranted: outcome.permissionGranted }))
+      .catch((error: unknown) =>
+        setNseProbeSeedOutcome({ kind: 'failed', message: error instanceof Error ? error.message : String(error) }),
+      );
+  };
+
+  const runNseProbeRead = (): void => {
+    setNseProbeResult(null);
+    readNseProbeResult()
+      .then(setNseProbeResult)
+      .catch((error: unknown) =>
+        setNseProbeResult(error instanceof Error ? `read failed: ${error.message}` : 'read failed'),
+      );
+  };
 
   const connectionLabel =
     pairedState === 'unpaired'
@@ -375,6 +401,54 @@ export function SettingsScreen(): React.JSX.Element {
                   </Text>
                   <Icon name="chevron-forward" color="muted" size={16} />
                 </Pressable>
+              </Stack>
+            </Card>
+          </Stack>
+        ) : null}
+
+        {nseProbeEnabled() ? (
+          <Stack gap="xs">
+            <SectionHeader title="NSE probe" testID="settings-section-nse-probe" />
+            <Card>
+              <Stack gap="xs">
+                <Pressable
+                  accessibilityRole="button"
+                  testID="settings-nse-probe-seed"
+                  onPress={runNseProbeSeed}
+                  style={({ pressed }) => [styles.linkRow, { minHeight: theme.minTouchSize, opacity: pressed ? 0.7 : 1 }]}
+                >
+                  <Text variant="body" color="primary">
+                    Seed probe keys
+                  </Text>
+                  <Icon name="chevron-forward" color="muted" size={16} />
+                </Pressable>
+                {nseProbeSeedOutcome?.kind === 'seeded' ? (
+                  <Text variant="caption" color="muted" testID="settings-nse-probe-seeded">
+                    {`Seeded, permission ${nseProbeSeedOutcome.permissionGranted ? 'granted' : 'denied'}`}
+                  </Text>
+                ) : null}
+                {nseProbeSeedOutcome?.kind === 'failed' ? (
+                  <Text variant="caption" color="danger" testID="settings-nse-probe-seed-error">
+                    {`Seed failed: ${nseProbeSeedOutcome.message}`}
+                  </Text>
+                ) : null}
+                <RowDivider />
+                <Pressable
+                  accessibilityRole="button"
+                  testID="settings-nse-probe-read"
+                  onPress={runNseProbeRead}
+                  style={({ pressed }) => [styles.linkRow, { minHeight: theme.minTouchSize, opacity: pressed ? 0.7 : 1 }]}
+                >
+                  <Text variant="body" color="primary">
+                    Read delivered notification
+                  </Text>
+                  <Icon name="chevron-forward" color="muted" size={16} />
+                </Pressable>
+                {nseProbeResult !== null ? (
+                  <Text variant="caption" color="muted" testID="settings-nse-probe-result">
+                    {nseProbeResult}
+                  </Text>
+                ) : null}
               </Stack>
             </Card>
           </Stack>

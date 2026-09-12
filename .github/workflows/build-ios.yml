@@ -57,6 +57,10 @@ on:
         description: 'Reveal the crash-reporting test rows in Settings and drive them on the simulator so Sentry receives iOS events. For verifying delivery and what a crash report contains; never for a store submission.'
         type: boolean
         default: false
+      nse_probe:
+        description: 'Seed known probe keys into the shared Keychain from Settings and simctl-push a sealed envelope, to prove the Notification Service Extension decrypts on a simulator. Never for a store submission.'
+        type: boolean
+        default: false
   # Weekly drift detection. Nothing here is PR-triggered, so without a schedule the
   # only way to learn that a runner Xcode bump, a dependency update, or an Apple
   # toolchain change broke the iOS build is to want a release and discover it then.
@@ -113,6 +117,7 @@ jobs:
       # event rather than leaning on an input default - the same trap as the
       # job's own `if:` above. A cron run must never crash-test anything.
       CRASH_TEST: ${{ github.event_name == 'workflow_dispatch' && inputs.crash_test == true }}
+      NSE_PROBE: ${{ github.event_name == 'workflow_dispatch' && inputs.nse_probe == true }}
 
     steps:
       # iOS has no `plan` job, so the refusal build-android.yml puts there is
@@ -120,12 +125,14 @@ jobs:
       # any dispatch, whatever `target` says, so the operator's intent is
       # checked before a runner minute is spent. A crash-test build reveals
       # Settings rows that crash the app and turns on the SDK's debug logging;
-      # it must never reach TestFlight. submit-testflight refuses it too.
+      # an NSE-probe build reveals rows that seed KNOWN push keys into the
+      # Keychain. Neither must ever reach TestFlight. submit-testflight refuses
+      # them too.
       - name: Refuse a probe build that is also a store submission
-        if: inputs.crash_test == true && inputs.submit == 'testflight'
+        if: (inputs.crash_test == true || inputs.nse_probe == true) && inputs.submit == 'testflight'
         run: |
           set -euo pipefail
-          echo "::error::crash_test and submit=testflight are mutually exclusive. A crash-test build reveals the Settings crash rows and enables Sentry debug logging, so it must never be uploaded to App Store Connect. Dispatch them as two separate runs."
+          echo "::error::crash_test / nse_probe and submit=testflight are mutually exclusive. A probe build reveals Settings rows that crash the app or seed known Keychain keys, so it must never be uploaded to App Store Connect. Dispatch them as separate runs."
           exit 1
 
       # A screenshot run skips the `Launch the app on a simulator` step, which
@@ -134,10 +141,10 @@ jobs:
       # 25-minute build - reading as iOS-driver flakiness rather than as a
       # dispatch that asked for two incompatible things.
       - name: Refuse a probe build combined with the screenshot capture
-        if: inputs.crash_test == true && inputs.screenshots == 'true'
+        if: (inputs.crash_test == true || inputs.nse_probe == true) && inputs.screenshots == 'true'
         run: |
           set -euo pipefail
-          echo "::error::crash_test and screenshots=true are mutually exclusive: the screenshot capture boots its own simulator and skips the launch step the probe drives. Dispatch them as two separate runs."
+          echo "::error::crash_test / nse_probe and screenshots=true are mutually exclusive: the screenshot capture boots its own simulator and skips the launch step the probes drive. Dispatch them as separate runs."
           exit 1
 
       - uses: actions/checkout@v7
@@ -189,6 +196,27 @@ jobs:
           set -euo pipefail
           echo "EXPO_PUBLIC_KANGENTIC_CRASHTEST=1" >> "$GITHUB_ENV"
           echo "::notice::Crash-test rows are enabled in Settings for this build, and it reports to the crash-test Sentry environment. It is a probe, not a distribution artifact."
+
+      # Both values are inlined at bundle time, so this precedes prebuild too.
+      #
+      # The Keychain group is the UN-PREFIXED literal on purpose. A shipped
+      # build's group is `<TeamID>.com.kangentic.mobile.shared`, composed in
+      # the device job from the provisioning profile, because kSecAttrAccessGroup
+      # needs the team-prefixed literal and the team id must not be committed.
+      # An ad-hoc simulator build has no team, so `$(AppIdentifierPrefix)` in
+      # both entitlements files should expand to nothing and the group the app
+      # and the extension actually carry is the bare one. That expansion is the
+      # probe's single most uncertain assumption, which is why the step after
+      # the build prints and asserts the entitlement the bundles really carry.
+      - name: Export the NSE probe env
+        if: env.NSE_PROBE == 'true'
+        run: |
+          set -euo pipefail
+          {
+            echo "EXPO_PUBLIC_KANGENTIC_NSE_PROBE=1"
+            echo "EXPO_PUBLIC_KANGENTIC_IOS_KEYCHAIN_GROUP=com.kangentic.mobile.shared"
+          } >> "$GITHUB_ENV"
+          echo "::notice::NSE probe rows are enabled in Settings for this build, and its push key writes target the un-prefixed shared Keychain group. It is a probe, not a distribution artifact."
 
       - name: Generate the native iOS project
         # CNG: ios/ is produced here and never committed. See
@@ -271,7 +299,7 @@ jobs:
           FORCE_BUNDLING: ${{ inputs.screenshots == 'true' && '1' || '' }}
           EXPO_PUBLIC_KANGENTIC_MOCK: ${{ inputs.screenshots == 'true' && '1' || '' }}
           BUILD_CONFIGURATION: ${{ inputs.screenshots == 'true' && 'Debug' || 'Release' }}
-          SIGN_AD_HOC: ${{ (inputs.screenshots == 'true' || inputs.crash_test == true) && '1' || '' }}
+          SIGN_AD_HOC: ${{ (inputs.screenshots == 'true' || inputs.crash_test == true || inputs.nse_probe == true) && '1' || '' }}
         run: |
           set -euo pipefail
 
@@ -298,7 +326,9 @@ jobs:
           # to deliver two clean, deliberate crashes. The probe stays on the
           # RELEASE configuration, deliberately: a JS throw is fatal only in
           # Release, the bundle is embedded, and the dSYM phase does not skip
-          # it.
+          # it. The NSE probe needs it most of all: keychain sharing between
+          # the app and its extension is an ENTITLEMENT, and an unsigned bundle
+          # has none.
           #
           # The plain compile check stays UNSIGNED. It exists to be runnable by
           # anyone with no Apple setup whatsoever, and nothing about it needs the
@@ -421,6 +451,40 @@ jobs:
           fi
           echo "app-path=$app_path" >> "$GITHUB_OUTPUT"
 
+      # THE NSE PROBE'S MOST UNCERTAIN ASSUMPTION, checked before a simulator
+      # minute is spent on it. The extension reads the push key through its
+      # `keychain-access-groups` entitlement (SharedKeychain.swift sets no
+      # group on the query), and the app writes with the group the bundle
+      # inlined. Both entitlements files spell it `$(AppIdentifierPrefix)` +
+      # `com.kangentic.mobile.shared`; on an ad-hoc simulator build with no
+      # team that prefix should expand to nothing, but nothing has verified it.
+      # So: read the entitlements out of BOTH signed bundles, print them (safe:
+      # this job installs no signing material, so no team id can appear), and
+      # fail naming the observed value when it is not the literal the app was
+      # built with. Attempt two then corrects the literal from evidence.
+      - name: Verify the shared Keychain group the simulator bundles carry
+        if: env.NSE_PROBE == 'true'
+        env:
+          APP_PATH: ${{ steps.verify.outputs.app-path }}
+        run: |
+          set -euo pipefail
+          expected_group="$EXPO_PUBLIC_KANGENTIC_IOS_KEYCHAIN_GROUP"
+          for bundle in "$APP_PATH" "$APP_PATH/PlugIns/KangenticNSE.appex"; do
+            echo "::group::Entitlements of $(basename "$bundle")"
+            entitlements="$(codesign -d --entitlements - --xml "$bundle" 2>/dev/null || codesign -d --entitlements :- "$bundle" 2>/dev/null || true)"
+            echo "$entitlements"
+            echo "::endgroup::"
+            if [ -z "$entitlements" ]; then
+              echo "::error::$(basename "$bundle") carries no readable entitlements. The ad-hoc signing did not embed any, so the app and the extension cannot share a Keychain group."
+              exit 1
+            fi
+            if ! echo "$entitlements" | grep -q "<string>$expected_group</string>"; then
+              echo "::error::$(basename "$bundle") does not carry the Keychain group the app was built to write to ($expected_group). Read the group it DOES carry above and correct the literal in 'Export the NSE probe env'."
+              exit 1
+            fi
+          done
+          echo "Both bundles carry keychain-access-group $expected_group."
+
       # Compiling is not running. Until this step existed the iOS app had never
       # been launched anywhere, so a missing Info.plist key, a native module that
       # throws in its constructor, or a JS bundle that dies on first render would
@@ -442,7 +506,7 @@ jobs:
           # Keeps the simulator up for the Maestro steps below (the smoke flow
           # and the crash-test probe), which drive the same one. Booting a
           # simulator takes over a minute.
-          KEEP_SIMULATOR_BOOTED: ${{ (inputs.maestro != 'none' || inputs.crash_test == true) && '1' || '' }}
+          KEEP_SIMULATOR_BOOTED: ${{ (inputs.maestro != 'none' || inputs.crash_test == true || inputs.nse_probe == true) && '1' || '' }}
         run: bash .github/scripts/smoke-ios-simulator.sh "$APP_PATH" com.kangentic.mobile "$RUNNER_TEMP/launch.png"
 
       # App Store listing screenshots. EXPERIMENTAL and opt-in: see the header of
@@ -677,8 +741,8 @@ jobs:
       # terminal needs a paired session, which needs the stub desktop peer and the
       # `usesCleartextTraffic` carve-out that is still unlanded.
       - name: Install Maestro and its iOS driver
-        # The crash-test probe drives its flows with the same driver.
-        if: inputs.maestro != 'none' || inputs.crash_test == true
+        # Both probes drive their flows with the same driver.
+        if: inputs.maestro != 'none' || inputs.crash_test == true || inputs.nse_probe == true
         run: |
           set -euo pipefail
           brew tap facebook/fb
@@ -799,22 +863,73 @@ jobs:
           fi
           echo "Crash reports collected: $(find "$EVIDENCE" -maxdepth 1 -name '*.ips' | wc -l | tr -d ' ')"
           # sentry-cocoa logs through NSLog under the APP's process when
-          # `debug: true` (which the crash-test flag turns on), so the process
-          # clause is the load-bearing one; a `subsystem` match would find
-          # nothing. Evidence, not assertion: the exact strings are
+          # `debug: true` (which the crash-test flag turns on). Matched on the
+          # process IMAGE PATH rather than the process name: run 34671071483's
+          # predicate on `process == "<scheme>"` captured other daemons'
+          # lines and none of the app's, so the app's image path inside the
+          # .app bundle is the discriminator, and it also covers the extension
+          # inside PlugIns/. Evidence, not assertion: the exact strings are
           # SDK-version-dependent.
           xcrun simctl spawn "$MAESTRO_DEVICE" log show --last 30m --style compact \
-            --predicate "process == \"$SCHEME\" OR eventMessage CONTAINS[c] \"sentry\"" \
+            --predicate "processImagePath CONTAINS \"$SCHEME.app\"" \
             > "$EVIDENCE/unified-log.txt" 2>&1 || true
-          echo "Unified-log lines mentioning Sentry: $(grep -ci sentry "$EVIDENCE/unified-log.txt" || true)"
+          echo "Unified-log lines from the app: $(wc -l < "$EVIDENCE/unified-log.txt" | tr -d ' '), mentioning Sentry: $(grep -ci sentry "$EVIDENCE/unified-log.txt" || true)"
           xcrun simctl io "$MAESTRO_DEVICE" screenshot "$EVIDENCE/final.png" || true
 
+      # THE NSE PROBE. Seeds known push vectors into the shared Keychain from
+      # Settings (through the production write path), seals a push with the
+      # same vectors on the runner, pushes it to the TERMINATED app (a
+      # notification for a terminated app is rendered by SpringBoard with no
+      # foreground-presentation question; the app sets no notification
+      # handler), and reads back what the OS displayed through the app. The
+      # read flow is the verdict; banner.png is the human evidence; the
+      # extension's lines in the unified log separate "never ran" from "ran and
+      # fell back to the placeholder", which is the distinction
+      # docs/developer-guide.md says a delivered notification alone cannot make.
+      # Runs after the crash probe when both are dispatched, so a failure here
+      # never costs the crash evidence.
+      - name: Run the NSE probe
+        if: env.NSE_PROBE == 'true'
+        timeout-minutes: 20
+        env:
+          MAESTRO_DEVICE: ${{ steps.smoke.outputs.device-id }}
+          EVIDENCE: ${{ runner.temp }}/nse-probe
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE"
+          maestro --version
+          maestro --device "$MAESTRO_DEVICE" test .maestro/probes/nse-seed.yaml \
+            --format JUNIT --output "$EVIDENCE/seed.xml" \
+            --debug-output "$EVIDENCE/seed-debug" --flatten-debug-output
+          # Sealed immediately before the push: the envelope's sentAt is the
+          # moment of sealing and the extension enforces a freshness window.
+          node scripts/sealNseProbePush.mjs --out "$EVIDENCE/payload.json"
+          xcrun simctl terminate "$MAESTRO_DEVICE" com.kangentic.mobile || true
+          sleep 2
+          xcrun simctl push "$MAESTRO_DEVICE" com.kangentic.mobile "$EVIDENCE/payload.json"
+          sleep 4
+          xcrun simctl io "$MAESTRO_DEVICE" screenshot "$EVIDENCE/banner.png" || true
+          xcrun simctl spawn "$MAESTRO_DEVICE" log show --last 5m --style compact \
+            --predicate "processImagePath CONTAINS \"KangenticNSE\" OR (subsystem == \"com.apple.usernotifications\" AND eventMessage CONTAINS[c] \"kangentic\")" \
+            > "$EVIDENCE/unified-log.txt" 2>&1 || true
+          echo "Unified-log lines from the extension process: $(grep -c KangenticNSE "$EVIDENCE/unified-log.txt" || true)"
+          # The mechanical verdict: the app reads back what the OS displayed.
+          if ! maestro --device "$MAESTRO_DEVICE" test .maestro/probes/nse-read.yaml \
+            --format JUNIT --output "$EVIDENCE/read.xml" \
+            --debug-output "$EVIDENCE/read-debug" --flatten-debug-output; then
+            echo "::error::The delivered title is not the extension's. Read banner.png: the placeholder means the extension did not run or could not read the shared group (see unified-log.txt for KangenticNSE lines); nothing means the push was never rendered (permission). The read flow's failure screenshot shows what the app read back."
+            exit 1
+          fi
+          echo "The Notification Service Extension decrypted the probe push on the simulator."
+
       - name: Upload the probe evidence
-        if: always() && env.CRASH_TEST == 'true'
+        if: always() && (env.CRASH_TEST == 'true' || env.NSE_PROBE == 'true')
         uses: actions/upload-artifact@v7
         with:
           name: ios-probe-evidence-${{ github.sha }}
-          path: ${{ runner.temp }}/crash-evidence
+          path: |
+            ${{ runner.temp }}/crash-evidence
+            ${{ runner.temp }}/nse-probe
           retention-days: 14
           if-no-files-found: warn
           # Maestro writes its debug output under a dot directory, which
@@ -865,7 +980,15 @@ jobs:
               echo "Evidence (crash reports, unified log, Maestro output) is in the \`ios-probe-evidence-*\`"
               echo "artifact. Verify from the desk with the recipe in the crash reporting section of"
               echo "docs/developer-guide.md."
-            else
+            fi
+            if [ "${NSE_PROBE:-}" = "true" ]; then
+              echo ""
+              echo "**NSE probe.** Known push vectors seeded from Settings, a sealed push delivered with"
+              echo "\`simctl push\`, and the delivered title read back through the app. The read flow's"
+              echo "result is the verdict; \`banner.png\` and the extension's unified-log lines are in the"
+              echo "\`ios-probe-evidence-*\` artifact."
+            fi
+            if [ "${CRASH_TEST:-}" != "true" ] && [ "${NSE_PROBE:-}" != "true" ]; then
               echo "Unsigned simulator build, so it is not installable on a device and not a"
               echo "distribution artifact. It IS launched on a simulator, and the run's"
               echo "\`ios-simulator-launch-*\` artifact holds a screenshot of what rendered."
@@ -905,16 +1028,16 @@ jobs:
 
     steps:
       # The simulator job's copy of the same refusal, so it is unconditional
-      # across `target` values. This job does not otherwise honour
-      # `crash_test`: a distribution-signed probe .ipa would be installable
-      # only through TestFlight, which the refusal makes impossible, so it
-      # would be a 30-minute artifact nobody can run. The simulator job is
-      # where the probe lives.
+      # across `target` values. This job does not otherwise honour either
+      # probe flag: a distribution-signed probe .ipa would be installable only
+      # through TestFlight, which the refusal makes impossible, so it would be
+      # a 30-minute artifact nobody can run. The simulator job is where the
+      # probes live.
       - name: Refuse a probe build that is also a store submission
-        if: inputs.crash_test == true && inputs.submit == 'testflight'
+        if: (inputs.crash_test == true || inputs.nse_probe == true) && inputs.submit == 'testflight'
         run: |
           set -euo pipefail
-          echo "::error::crash_test and submit=testflight are mutually exclusive. A crash-test build reveals the Settings crash rows and enables Sentry debug logging, so it must never be uploaded to App Store Connect. Dispatch them as two separate runs."
+          echo "::error::crash_test / nse_probe and submit=testflight are mutually exclusive. A probe build reveals Settings rows that crash the app or seed known Keychain keys, so it must never be uploaded to App Store Connect. Dispatch them as separate runs."
           exit 1
 
       - uses: actions/checkout@v7
@@ -1324,7 +1447,7 @@ jobs:
     # `inputs.crash_test != true` is belt-and-braces to the refusal step at the
     # top of both build jobs, mirroring submit-play on Android: a probe build
     # must not reach App Store Connect even if that step were ever removed.
-    if: github.event_name != 'schedule' && inputs.submit == 'testflight' && inputs.crash_test != true
+    if: github.event_name != 'schedule' && inputs.submit == 'testflight' && inputs.crash_test != true && inputs.nse_probe != true
     runs-on: macos-latest
     timeout-minutes: 60
     environment: app-store-connect

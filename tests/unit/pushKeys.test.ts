@@ -146,6 +146,62 @@ describe('pushKeys', () => {
     expect(await pushKeys.getLastRegisteredExpoToken()).toBe('ExponentPushToken[rotated]');
   });
 
+  /**
+   * The NSE probe (build-ios.yml `nse_probe`): known vectors are written
+   * through the SAME options every real write uses, so what the extension
+   * reads on the simulator is the production Keychain layout, not a special
+   * case. Without a shared group there is nowhere shared to write, and the
+   * probe must say so rather than seed the private location and report a
+   * placeholder that looks like an extension failure.
+   */
+  it('seedSharedPushKeysForProbe writes both items into the shared service and group, and nowhere else', async () => {
+    configureSharedKeychain();
+    const pushKeys = await loadPushKeys();
+    const pushKey = new Uint8Array(32).fill(0x11);
+    const identityPublicKey = new Uint8Array(32).fill(0xee);
+
+    await pushKeys.seedSharedPushKeysForProbe(pushKey, identityPublicKey);
+
+    expect(sharedValue('push.decrypt.key')).toBe(bytesToHex(pushKey));
+    expect(sharedValue('push.identity.pk')).toBe(bytesToHex(identityPublicKey));
+    expect(legacyValue('push.decrypt.key')).toBeUndefined();
+    expect(legacyValue('push.identity.pk')).toBeUndefined();
+  });
+
+  it('seedSharedPushKeysForProbe refuses without a shared group, and writes nothing', async () => {
+    const pushKeys = await loadPushKeys();
+
+    await expect(pushKeys.seedSharedPushKeysForProbe(new Uint8Array(32), new Uint8Array(32))).rejects.toThrow(/shared/i);
+
+    expect(secureStoreState.storedValues.size).toBe(0);
+  });
+
+  it('seedSharedPushKeysForProbe refuses a key of the wrong length, and writes nothing', async () => {
+    configureSharedKeychain();
+    const pushKeys = await loadPushKeys();
+
+    await expect(pushKeys.seedSharedPushKeysForProbe(new Uint8Array(16), new Uint8Array(32))).rejects.toThrow(/32/);
+    await expect(pushKeys.seedSharedPushKeysForProbe(new Uint8Array(32), new Uint8Array(16))).rejects.toThrow(/32/);
+
+    expect(secureStoreState.storedValues.size).toBe(0);
+  });
+
+  it('seedSharedPushKeysForProbe replaces the in-memory key, so the decrypt path reads the seeded value', async () => {
+    // The mechanism assertion: a generated key sits in the module cache, and a
+    // seed that only wrote storage would leave getPushKeyIfExists returning
+    // the old key while the extension decrypts with the new one.
+    configureSharedKeychain();
+    const pushKeys = await loadPushKeys();
+    const generatedKey = await pushKeys.getOrCreatePushKey();
+    const seededKey = new Uint8Array(32).fill(0x11);
+
+    await pushKeys.seedSharedPushKeysForProbe(seededKey, new Uint8Array(32).fill(0xee));
+
+    const readBack = await pushKeys.getPushKeyIfExists();
+    expect(Array.from(readBack ?? [])).toEqual(Array.from(seededKey));
+    expect(Array.from(readBack ?? [])).not.toEqual(Array.from(generatedKey));
+  });
+
   it('clearPushRegistration deletes both secure-store entries and the in-memory key cache', async () => {
     const pushKeys = await loadPushKeys();
     const originalKey = await pushKeys.getOrCreatePushKey();

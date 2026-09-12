@@ -58,6 +58,19 @@ jest.mock('@/connection/connectionManager', () => ({
 // matters here beyond assertion convenience: the real `crashNatively` calls
 // `Sentry.nativeCrash()`, and the real `throwTestError` schedules a throw on
 // a timer that would surface as an unhandled error in a later test.
+// The NSE probe module reaches notifee and the push-key store, so it is stubbed
+// whole; its own behaviour is covered in tests/unit/nseProbe.test.ts and
+// pushKeys.test.ts. The flag is a mock rather than an env var because the
+// module, not the screen, owns the env read.
+const mockNseProbeEnabled = jest.fn().mockReturnValue(false);
+const mockSeedNseProbe = jest.fn().mockResolvedValue({ permissionGranted: true });
+const mockReadNseProbeResult = jest.fn().mockResolvedValue('Agent needs your input | NSE probe - decrypted on device');
+jest.mock('@/devsupport/nseProbe', () => ({
+  nseProbeEnabled: () => mockNseProbeEnabled(),
+  seedNseProbe: () => mockSeedNseProbe(),
+  readNseProbeResult: () => mockReadNseProbeResult(),
+}));
+
 const mockThrowTestError = jest.fn();
 const mockCrashNatively = jest.fn();
 const mockReportHandledTestError = jest.fn();
@@ -378,6 +391,61 @@ describe('SettingsScreen', () => {
     expect(mockReportHandledTestError).toHaveBeenCalledTimes(1);
     expect(mockThrowTestError).toHaveBeenCalledTimes(1);
     expect(mockCrashNatively).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides the NSE probe section by default', () => {
+    renderSettings();
+    expect(screen.queryByTestId('settings-section-nse-probe')).toBeNull();
+    expect(screen.queryByTestId('settings-nse-probe-seed')).toBeNull();
+    expect(screen.queryByTestId('settings-nse-probe-read')).toBeNull();
+  });
+
+  it('reveals the NSE probe rows only when the probe flag is on', () => {
+    mockNseProbeEnabled.mockReturnValueOnce(true);
+    renderSettings();
+    expect(screen.getByTestId('settings-section-nse-probe')).toBeTruthy();
+    expect(screen.getByTestId('settings-nse-probe-seed')).toBeTruthy();
+    expect(screen.getByTestId('settings-nse-probe-read')).toBeTruthy();
+  });
+
+  it('seeds the probe keys and shows the outcome, including the permission answer', async () => {
+    mockNseProbeEnabled.mockReturnValue(true);
+    mockSeedNseProbe.mockClear();
+    renderSettings();
+
+    fireEvent.press(screen.getByTestId('settings-nse-probe-seed'));
+
+    expect(await screen.findByTestId('settings-nse-probe-seeded')).toBeTruthy();
+    expect(screen.getByText(/permission granted/)).toBeTruthy();
+    expect(mockSeedNseProbe).toHaveBeenCalledTimes(1);
+    mockNseProbeEnabled.mockReturnValue(false);
+  });
+
+  it('shows a seed failure by its message, so an entitlement error is readable on the screenshot', async () => {
+    // The Maestro flow waits for the seeded id, so a failure is a timeout plus
+    // this text in the failure screenshot: errSecMissingEntitlement reads
+    // differently from a decrypt failure, which is the point.
+    mockNseProbeEnabled.mockReturnValue(true);
+    mockSeedNseProbe.mockRejectedValueOnce(new Error('A required entitlement is not present (errSecMissingEntitlement)'));
+    renderSettings();
+
+    fireEvent.press(screen.getByTestId('settings-nse-probe-seed'));
+
+    expect(await screen.findByTestId('settings-nse-probe-seed-error')).toBeTruthy();
+    expect(screen.getByText(/errSecMissingEntitlement/)).toBeTruthy();
+    expect(screen.queryByTestId('settings-nse-probe-seeded')).toBeNull();
+    mockNseProbeEnabled.mockReturnValue(false);
+  });
+
+  it('reads the delivered notification into the result row', async () => {
+    mockNseProbeEnabled.mockReturnValue(true);
+    renderSettings();
+
+    fireEvent.press(screen.getByTestId('settings-nse-probe-read'));
+
+    expect(await screen.findByTestId('settings-nse-probe-result')).toBeTruthy();
+    expect(screen.getByText('Agent needs your input | NSE probe - decrypted on device')).toBeTruthy();
+    mockNseProbeEnabled.mockReturnValue(false);
   });
 
   /**

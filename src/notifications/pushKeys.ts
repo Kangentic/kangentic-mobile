@@ -197,6 +197,31 @@ export async function persistNsePushIdentityPublicKey(identityPublicKey: Uint8Ar
 }
 
 /**
+ * PROBE ONLY (`build-ios.yml -f nse_probe=true`, src/devsupport/nseProbe.ts).
+ * Overwrites both items the Notification Service Extension reads with KNOWN
+ * vectors, through the SAME options every real write uses, so the runner can
+ * seal a push with the same vectors and prove the extension decrypts on a
+ * simulator. Refuses without a shared group: there is nowhere shared to write,
+ * and seeding the private location would render a placeholder that reads
+ * exactly like an extension failure. Lives here so every `push.*` key-storage
+ * call site stays in this module (secure-storage.md's inventory).
+ */
+export async function seedSharedPushKeysForProbe(pushKey: Uint8Array, identityPublicKey: Uint8Array): Promise<void> {
+  if (!usesSharedKeychain()) {
+    throw new Error('No shared Keychain group is configured, so there is nowhere the extension could read a seeded key from');
+  }
+  if (pushKey.length !== PUSH_KEY_LENGTH || identityPublicKey.length !== PUSH_KEY_LENGTH) {
+    throw new Error(`Probe vectors must be ${PUSH_KEY_LENGTH} bytes each`);
+  }
+  // The decrypt path must read the seeded key, never a generated one cached
+  // earlier in this process: same invalidation as clearPushRegistration.
+  pushKeyGeneration += 1;
+  cachedPushKey = null;
+  await SecureStore.setItemAsync(PUSH_DECRYPT_KEY_STORAGE_KEY, bytesToHex(pushKey), sharedPushStorageOptions());
+  await SecureStore.setItemAsync(PUSH_IDENTITY_PUBLIC_KEY_STORAGE_KEY, bytesToHex(identityPublicKey), sharedPushStorageOptions());
+}
+
+/**
  * The last Expo push token successfully registered with the desktop, for
  * rotation detection. The token is a per-device bearer secret
  * (docs/architecture.md), so it lives in the secure store like every other

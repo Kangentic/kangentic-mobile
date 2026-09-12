@@ -1,0 +1,58 @@
+appId: com.kangentic.mobile
+---
+# NSE PROBE, first half. Not a test, and not part of either E2E suite.
+#
+# Seeds the known probe vectors into the shared Keychain from Settings and
+# asks for notification permission, so that the workflow step can `simctl
+# push` an envelope sealed with the same vectors and the extension has both
+# a key to read and permission to render. Only `build-ios.yml -f
+# nse_probe=true` runs it, against a build whose bundle carries
+# EXPO_PUBLIC_KANGENTIC_NSE_PROBE=1 and the un-prefixed shared Keychain
+# group; on any other build the rows do not exist and scrollUntilVisible
+# times out. See src/devsupport/nseProbeVectors.ts.
+- launchApp
+- extendedWaitUntil:
+    visible:
+      text: "Agents"
+    timeout: 45000
+- tapOn:
+    id: "header-settings-button"
+- extendedWaitUntil:
+    visible:
+      id: "settings-screen"
+    timeout: 20000
+# Centred, not merely reached: see crash-test-js.yaml for the run where a row
+# counted as visible while clipped below its scroll container.
+- scrollUntilVisible:
+    element:
+      id: "settings-nse-probe-seed"
+    direction: DOWN
+    visibilityPercentage: 100
+    centerElement: true
+    timeout: 30000
+- tapOn:
+    id: "settings-nse-probe-seed"
+# The OS permission alert is platform chrome we do not render, so its button
+# is selected by label (the documented carve-out in
+# .claude/rules/e2e-maestro-runs.md). It appears a beat after the tap, so
+# this polls a few hierarchy reads for it rather than checking once; a build
+# where permission was already decided simply never sees it.
+- repeat:
+    times: 6
+    commands:
+      - runFlow:
+          when:
+            visible:
+              text: "Allow"
+          commands:
+            - tapOn:
+                text: "Allow"
+# The seeded label renders only when both the Keychain writes and the
+# permission request resolved. A seed failure renders
+# settings-nse-probe-seed-error with the message instead, and this times out
+# with that text in the failure screenshot - which is how an
+# errSecMissingEntitlement is told apart from a decrypt failure.
+- extendedWaitUntil:
+    visible:
+      id: "settings-nse-probe-seeded"
+    timeout: 20000

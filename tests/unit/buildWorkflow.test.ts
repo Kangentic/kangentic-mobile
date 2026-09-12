@@ -781,7 +781,7 @@ describe('build-ios crash-test probe', () => {
     // produce two clean events. `withoutComments` because the comment above
     // the line names SIGN_AD_HOC too.
     expect(withoutComments(readIosJob('simulator'))).toContain(
-      "SIGN_AD_HOC: ${{ (inputs.screenshots == 'true' || inputs.crash_test == true) && '1' || '' }}"
+      "SIGN_AD_HOC: ${{ (inputs.screenshots == 'true' || inputs.crash_test == true || inputs.nse_probe == true) && '1' || '' }}"
     );
   });
 
@@ -835,6 +835,96 @@ describe('build-ios crash-test probe', () => {
     const uploadStep = requireStep('simulator', 'Upload the probe evidence');
     expect(uploadStep.if).toContain('always()');
     expect(uploadStep.with?.['include-hidden-files']).toBe(true);
+  });
+
+  /**
+   * The NSE probe: `build-ios.yml -f nse_probe=true` seeds known push vectors
+   * into the shared Keychain from Settings, seals a push with the same vectors
+   * on the runner, `simctl push`es it to the simulator, and reads back what the
+   * OS actually displayed. It exists because a delivered notification cannot
+   * distinguish "the extension decrypted" from "the extension never ran": the
+   * placeholder renders on any failure by design.
+   */
+  describe('NSE probe', () => {
+    it('defaults the nse_probe input off and names the dispatch event in its job env', () => {
+      expect(iosWorkflow.on.workflow_dispatch.inputs.nse_probe.type).toBe('boolean');
+      expect(iosWorkflow.on.workflow_dispatch.inputs.nse_probe.default).toBe(false);
+      expect(withoutComments(readIosJob('simulator'))).toContain(
+        "NSE_PROBE: ${{ github.event_name == 'workflow_dispatch' && inputs.nse_probe == true }}"
+      );
+    });
+
+    it('exports the probe flag and the UN-prefixed shared Keychain group before prebuild', () => {
+      // Both are EXPO_PUBLIC_* values inlined at bundle time. The group is the
+      // un-prefixed literal on purpose: an ad-hoc simulator build has no team,
+      // so $(AppIdentifierPrefix) in the entitlements expands to nothing, and a
+      // team-prefixed literal (which would also be personal information in a
+      // public workflow) would send the app's writes somewhere the extension
+      // cannot read.
+      const simulatorJob = readIosJob('simulator');
+      const exportIndex = simulatorJob.indexOf('Export the NSE probe env');
+      const prebuildIndex = simulatorJob.indexOf('expo prebuild --platform ios');
+      expect(exportIndex).toBeGreaterThan(-1);
+      expect(exportIndex).toBeLessThan(prebuildIndex);
+      const exportStep = requireStep('simulator', 'Export the NSE probe env');
+      expect(exportStep.if).toBe("env.NSE_PROBE == 'true'");
+      expect(exportStep.run).toContain('EXPO_PUBLIC_KANGENTIC_NSE_PROBE=1');
+      expect(exportStep.run).toContain('EXPO_PUBLIC_KANGENTIC_IOS_KEYCHAIN_GROUP=com.kangentic.mobile.shared');
+      expect(simulatorJob).not.toMatch(/[A-Z0-9]{10}\.com\.kangentic/);
+    });
+
+    it('refuses a probe build that is also a TestFlight submission or a screenshot capture', () => {
+      for (const jobName of ['simulator', 'device']) {
+        expect(requireStep(jobName, 'Refuse a probe build that is also a store submission').if).toContain(
+          'inputs.nse_probe == true'
+        );
+      }
+      expect(requireStep('simulator', 'Refuse a probe build combined with the screenshot capture').if).toContain(
+        'inputs.nse_probe == true'
+      );
+      expect(iosWorkflow.jobs['submit-testflight'].if).toContain('inputs.nse_probe != true');
+    });
+
+    it('ad-hoc signs, keeps the simulator booted and installs Maestro for the probe', () => {
+      expect(requireStep('simulator', 'Launch the app on a simulator').env?.KEEP_SIMULATOR_BOOTED).toContain(
+        'inputs.nse_probe == true'
+      );
+      expect(requireStep('simulator', 'Install Maestro and its iOS driver').if).toContain('inputs.nse_probe == true');
+    });
+
+    it('verifies the entitlement group the built bundles actually carry, before anything is seeded', () => {
+      // Whether the simulator honours a shared access group between two
+      // ad-hoc-signed bundles is the probe's most uncertain assumption, so the
+      // observed entitlement is printed and asserted BEFORE the simulator time
+      // is spent, and a wrong literal fails naming the value to correct.
+      const simulatorJob = readIosJob('simulator');
+      const verifyStep = requireStep('simulator', 'Verify the shared Keychain group the simulator bundles carry');
+      expect(verifyStep.if).toBe("env.NSE_PROBE == 'true'");
+      expect(verifyStep.run).toContain('codesign');
+      expect(verifyStep.run).toContain('PlugIns/KangenticNSE.appex');
+      expect(simulatorJob.indexOf('Verify the shared Keychain group')).toBeLessThan(simulatorJob.indexOf('Run the NSE probe'));
+    });
+
+    it('drives the probe with the seal script and simctl push, against the simulator the smoke step booted', () => {
+      const probeStep = requireStep('simulator', 'Run the NSE probe');
+      expect(probeStep.if).toContain("env.NSE_PROBE == 'true'");
+      expect(probeStep.env?.MAESTRO_DEVICE).toBe('${{ steps.smoke.outputs.device-id }}');
+      expect(probeStep.run).toContain('scripts/sealNseProbePush.mjs');
+      expect(probeStep.run).toContain('simctl push');
+      // The app is killed before the push: a notification for a terminated app
+      // is rendered by SpringBoard with no foreground-presentation question.
+      expect(probeStep.run).toContain('simctl terminate');
+      for (const flowPath of ['.maestro/probes/nse-seed.yaml', '.maestro/probes/nse-read.yaml']) {
+        expect(probeStep.run).toContain(flowPath);
+        expect(existsSync(`${repositoryRoot}${flowPath}`), `${flowPath} is missing`).toBe(true);
+      }
+    });
+
+    it('uploads the probe evidence even when the probe fails', () => {
+      const uploadStep = requireStep('simulator', 'Upload the probe evidence');
+      expect(uploadStep.if).toContain("env.NSE_PROBE == 'true'");
+      expect(String(uploadStep.with?.path)).toContain('nse-probe');
+    });
   });
 });
 

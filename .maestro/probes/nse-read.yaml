@@ -1,0 +1,40 @@
+appId: com.kangentic.mobile
+---
+# NSE PROBE, second half. Not a test, and not part of either E2E suite.
+#
+# Runs after the workflow step has `simctl push`ed the sealed probe envelope
+# to a terminated app. Reads back what the OS actually displayed through
+# notifee's delivered-notifications API, so the verdict is mechanical rather
+# than a screenshot: the extension's real title means it decrypted, the
+# placeholder means it never ran or could not read the shared group, and
+# "no notification delivered" means the push was never rendered
+# (permission). See src/devsupport/nseProbe.ts.
+- launchApp
+- extendedWaitUntil:
+    visible:
+      text: "Agents"
+    timeout: 45000
+- tapOn:
+    id: "header-settings-button"
+- extendedWaitUntil:
+    visible:
+      id: "settings-screen"
+    timeout: 20000
+- scrollUntilVisible:
+    element:
+      id: "settings-nse-probe-read"
+    direction: DOWN
+    visibilityPercentage: 100
+    centerElement: true
+    timeout: 30000
+- tapOn:
+    id: "settings-nse-probe-read"
+- extendedWaitUntil:
+    visible:
+      id: "settings-nse-probe-result"
+    timeout: 15000
+# The category title CategoryCopy.swift assigns for `input-required`. Content
+# asserted by text, which is what the probe exists to observe (the testID
+# rule governs selecting things to tap).
+- assertVisible:
+    text: "Agent needs your input.*"

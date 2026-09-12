@@ -113,7 +113,10 @@ src/
   devsupport/     # Loopback transport, protocol-faithful stub peer classes, wire fixtures, the
                   #   dev-only inspect bridge (EXPO_PUBLIC_KANGENTIC_INSPECT) - shared by tests +
                   #   rigs - plus claudeCapture*.ts: RECORDED real Claude Code PTY output the mock
-                  #   terminal replays (generated, never hand-edited; see scripts/ below).
+                  #   terminal replays (generated, never hand-edited; see scripts/ below), the
+                  #   retention probe (EXPO_PUBLIC_KANGENTIC_RETENTION_PROBE) and the NSE probe
+                  #   (EXPO_PUBLIC_KANGENTIC_NSE_PROBE: seeds known push vectors so
+                  #   `build-ios.yml -f nse_probe=true` can prove the extension decrypts).
                   #   NOTE: no longer dev-only in the bundling sense - the demo pulls the
                   #   loopback transport, stub peer and fixtures into release builds
   terminal/       # Pure liveTail PTY cleaner, clean-feed differ, key sequences, WebView bridge,
@@ -151,6 +154,9 @@ scripts/          # bash-guard.js, dev.mjs, stubDesktopPeer.mjs, buildXtermHtml.
                   #   generateNseCryptoFixtures.mjs (seals push envelopes with the protocol
                   #   package so the Swift NSE crypto can be cross-checked by swiftc in CI;
                   #   regenerate with `node scripts/generateNseCryptoFixtures.mjs`),
+                  #   sealNseProbePush.mjs (seals the NSE probe push with the known vectors
+                  #   the app seeds under `build-ios.yml -f nse_probe=true`; the runner
+                  #   `simctl push`es its output),
                   #   mobileInspect.mjs, syncBranding.mjs, easProfile.mjs (CI reads eas.json
                   #   profiles through it), androidAbis.mjs, checkInstallDrift.mjs (the
                   #   pretypecheck stale-node_modules guard), the store preflights

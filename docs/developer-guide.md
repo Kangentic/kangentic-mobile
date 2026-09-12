@@ -2066,6 +2066,60 @@ delivered events read back through the Sentry MCP:
   iOS native crash reporting was not verified at all (no Mac, no iOS device, and neither CI route
   produces an interactively-testable signed build).
 
+**Capture audit, 2026-09-11 (task #67).** Read this before re-deriving any of it in a `/sentry`
+sweep. The question was whether the project looked nearly empty because the app is stable or
+because errors users hit never reach it, and the answer was both: the uncaught paths worked and
+had little to say, every deliberate catch swallowed, and iOS had never delivered.
+
+- *The lifetime picture at the time of the audit.* Five issues ever, roughly 13 events, every one
+  Android: the two crash-test issues (MOBILE-1, the ONLY JS-captured event the project had ever
+  received, and MOBILE-2), the notifee foreground-service family (MOBILE-3 and MOBILE-4, tasks
+  #48 and #65) and the OOM red herring (MOBILE-5, #48). Releases known to Sentry: `0.1.0+2`,
+  `0.2.0+2`, `0.3.0+3`, `0.4.0+4`, `0.6.2+10`, each created lazily by its first event. No iOS
+  release record existed, which is a stronger statement than "zero iOS events": nothing had ever
+  reported from an iOS build, including the real TestFlight crash on `0.6.3 (13)` (task #69,
+  fixed by PR #77), whose stored envelope never arrived. Every deliberate catch in the app
+  swallowed, so the only errors that could arrive were uncaught ones; that is what the
+  handled-error door (`reportHandledError`, `.claude/rules/crash-reporting-scope.md`) changes.
+- *Verified working, do not spend time here again:* the DSN reaches production Android builds
+  (the `0.6.2+10` events carry `environment: production`); symbol uploads run on every build
+  (Hermes artifact bundles, R8 mappings and iOS dSYMs appear in step with the workflow run list);
+  nothing is lost server-side (`stats_v2`: 16 accepted in 90 days, 0 filtered, 0 dropped, 0
+  rate-limited; the key's 500/hour limit is not binding; inbound filters are off); alerting is at
+  parity with the desktop project; Hermes promise-rejection tracking is active; the Android
+  uncaught JS and Java paths are proven; Sentry retention is 30 days, so a small 90-day count is
+  partly a retention artefact. The 16-versus-13 count difference is sentry-android's dedup of the
+  re-caught `JavascriptException` wrapper, counted as accepted, not loss.
+- *Finding 3, a crash before `Sentry.init()`: accepted, in writing.* `index.js` initialises after
+  `expo-router/entry` evaluates and native auto-init is off, so a crash during native startup or
+  bundle evaluation is lost. Closing it needs the native init (`RNSentrySDK.init` through a
+  config plugin) plus a `sentry.options.json` that would duplicate every privacy control outside
+  the one door, against the rule's "every control at its source". No evidence of a pre-init
+  crash class exists: the only real iOS crash (#69) happened with the JS SDK live. Revisit only if
+  a store crash report ever shows a crash before JS init.
+- *Finding 4, the deliberate-off controls: all four kept off,* with the consequence of each.
+  `enableAutoSessionTracking`: the privacy policy says no usage telemetry, and flipping it means
+  a privacy-policy, Play Data Safety and App Store privacy change; the cost is no crash-free rate
+  and no denominator, so cite event counts, never affected users. No user id: `scrubEvent` strips
+  it, so JS events always show 0 users; flipping it is a new identifier disclosure, and native
+  events already carry `contexts.device.id`. `enableCaptureFailedRequests`: it would carry
+  request URLs and the `request` context, and there are zero `fetch(` call sites in `src/`
+  anyway. No performance tracing: usage telemetry, and route parameters carry task ids.
+- *Finding 5, `ignoreErrors` dropping "Network request failed": kept.* `grep '\bfetch('` under
+  `src/` finds no call site (the one hit is a string inside a recorded transcript fixture); the
+  only fetches are inside expo-notifications' `getExpoPushTokenAsync` (caught in
+  `pushRegistration.ts`, status `unavailable-no-fcm`) and Sentry's own transport, so the pattern
+  cannot hide a user-facing failure. Note the interaction with the door: redaction hides the
+  original message from `ignoreErrors`, so the door applies the same patterns itself.
+- *Finding 6, the `eas build` fallback shipping inert: closed by provenance.* `eas build:list`
+  shows exactly one iOS cloud build ever (0.1.0 build 1, 2026-07-26, before any tester existed)
+  and zero Android; every install a tester holds came through the GitHub workflows, which export
+  the DSN. The warning below stands for the day the fallback is actually used.
+- *How a handled event looks, and how to verify one:* dispatch a `crash_test` build, tap "Report
+  handled error" in Settings, and read the event back via `/sentry`: `mechanism.handled: true`,
+  tags `site=crash-test errorName=CapabilityError verb=read-board`, title
+  `CapabilityError: handled at crash-test`, frames present, and the canary text absent.
+
 **The `eas build` fallback is NOT wired for Sentry.** Both values are exported by
 `build-android.yml` and `build-ios.yml` only. `eas.json` deliberately holds neither (that is the
 whole point of keeping them out of a committed file), and nothing configures them as EAS
