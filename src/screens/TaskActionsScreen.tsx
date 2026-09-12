@@ -2,7 +2,9 @@ import React, { useCallback, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import * as Linking from 'expo-linking';
 import { Icon, Row, Stack, Text, useTheme, type TextColorRole } from '@/components';
+import { prStateSummary } from '@/components/board/prChipPresentation';
 import { CapabilityError } from '@/channel';
 import { archiveTask, deleteTaskFromBoard } from '@/connection/actions';
 import { findTaskById, isDoneColumn, selectColumnsOrdered, useBoardStore } from '@/state/boardStore';
@@ -18,6 +20,31 @@ const MISSING_TASK_CONTEXT = 'Cannot act on this task - close and reopen it';
 
 function messageForActionError(error: unknown, fallback: string): string {
   return error instanceof CapabilityError ? error.message : error instanceof Error ? error.message : fallback;
+}
+
+const HTTPS_SCHEME = 'https://';
+
+/**
+ * Only ever hand `https` to the OS opener.
+ *
+ * `pr_url` comes from the paired desktop, which is trusted, so this is not the
+ * load-bearing control - but "trusted source" is exactly the reasoning that
+ * turns an opener into a gadget the day some other path can write that column,
+ * and the guard costs one comparison. Anything else means the row does not
+ * render, rather than rendering a tap that refuses.
+ *
+ * Deliberately a string comparison rather than `new URL()`, for the reason
+ * `isSecureRelayAddress` in `src/pairing/qr.ts` gives: Hermes ships a partial
+ * URL implementation and React Native's polyfill situation varies by SDK, so a
+ * check whose verdict depends on which parser is present at runtime would be
+ * worse than the comparison it replaced. Jest runs on Node's complete URL, so
+ * that difference would never have shown up in a test.
+ */
+function httpsPrUrl(prUrl: string | null): string | null {
+  if (prUrl === null) return null;
+  // The scheme is case-insensitive, the rest of the URL is not.
+  if (!prUrl.toLowerCase().startsWith(HTTPS_SCHEME)) return null;
+  return prUrl.length > HTTPS_SCHEME.length ? prUrl : null;
 }
 
 /**
@@ -49,6 +76,32 @@ export function TaskActionsScreen(): React.JSX.Element {
   const [actionInFlight, setActionInFlight] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [deleteArmed, setDeleteArmed] = useState(false);
+
+  // The one non-mutating row in the sheet, and the only place the phone can
+  // act on the PR the card's readiness chip is talking about.
+  const prUrl = httpsPrUrl(task?.pr_url ?? null);
+  const prCaption = useMemo(() => {
+    if (!task) return null;
+    const state = prStateSummary(task.pr_state, task.pr_merge_readiness);
+    return task.pr_number === null ? state : `#${task.pr_number} - ${state}`;
+  }, [task]);
+
+  /**
+   * `Linking.openURL` hands the URL to the OS default handler, which is what
+   * lets a github.com PR open in the GitHub app through Android App Links /
+   * iOS Universal Links. An in-app browser (expo-web-browser) would keep it in
+   * a web view and deliberately skip that handoff.
+   */
+  const onViewPr = useCallback(() => {
+    if (prUrl === null) {
+      setErrorMessage(MISSING_TASK_CONTEXT);
+      return;
+    }
+    setErrorMessage(null);
+    void Linking.openURL(prUrl).catch((error: unknown) =>
+      setErrorMessage(messageForActionError(error, 'Could not open the pull request')),
+    );
+  }, [prUrl]);
 
   const onMove = useCallback(() => {
     if (!taskId || !projectId) {
@@ -130,6 +183,16 @@ export function TaskActionsScreen(): React.JSX.Element {
         <Text variant="title" numberOfLines={2}>
           {task ? task.title : 'Task'}
         </Text>
+        {prUrl !== null ? (
+          <ActionRow
+            label="View pull request"
+            iconName="git-pull-request"
+            onPress={onViewPr}
+            disabled={actionInFlight}
+            caption={prCaption}
+            testID="task-action-view-pr"
+          />
+        ) : null}
         <ActionRow
           label="Move to column"
           iconName="swap-horizontal"

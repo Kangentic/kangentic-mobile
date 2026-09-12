@@ -41,6 +41,14 @@ export interface ColorTokens {
   warning: string;
   danger: string;
   dangerMuted: string;
+  /**
+   * Merge conflicts, and anything else that is stuck rather than failed. The
+   * brand rust, promoted to a semantic role so it can sit beside `danger`
+   * without reading as it: a conflicting PR is still open and still landable,
+   * a closed one is not. Deliberately NOT amber, which the two-hue rule keeps
+   * for the brand and for attention.
+   */
+  conflict: string;
   /** Neutral informational tint (hints, callouts) distinct from all status hues. */
   info: string;
   diffAddBackground: string;
@@ -235,6 +243,7 @@ export const darkTerminalTheme: Theme = {
     danger: '#e05d5d',
     /** Danger's tinted fill, mixed the same way accentMuted is, for destructive controls that need a findable surface rather than only red lettering. */
     dangerMuted: mixHex('#e05d5d', BACKGROUND, 0.75),
+    conflict: brandTokens.rust,
     info: '#5da9e0',
     // Diff tints are solid dark blends (not alpha overlays) so mono 12px text
     // keeps full contrast regardless of what the row sits on.

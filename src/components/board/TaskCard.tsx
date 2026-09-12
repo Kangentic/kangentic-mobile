@@ -12,20 +12,15 @@ import {
   Stack,
   Text,
   useTheme,
+  colorForTextRole,
   isContextWindowKnown,
   type AgentStatusKind,
 } from '@/components';
 import { computeVisibleLabelCount } from './labelFit';
+import { prChipAccessibilityLabel, prChipPresentation } from './prChipPresentation';
 
 /** Before the labels row's real width is measured (its first layout pass). */
 const FALLBACK_LABEL_LIMIT = 3;
-
-/** Desktop-parity PR state colors (GitHub convention, from our tokens). */
-function prStateColor(theme: ReturnType<typeof useTheme>, prState: string | null): string {
-  if (prState === 'merged') return theme.colors.info;
-  if (prState === 'closed') return theme.colors.danger;
-  return theme.colors.success;
-}
 
 export interface TaskCardProps {
   /** Base testID; sub-parts key off it as `${testID}-status`, `-project`, `-display-id`, `-pr`, `-snippet`, `-usage`. */
@@ -111,6 +106,7 @@ export function TaskCard({
   // row says that without adding another stacked row of chrome. The number
   // itself is one tap away in the detail view.
   const hasPr = showMetaRow && task.pr_number !== null;
+  const prChip = prChipPresentation(task.pr_state, task.pr_merge_readiness);
   const hasMetaRow = showMetaRow && task.labels.length > 0;
   const hasUtilityStrip = isContextWindowKnown(usage);
 
@@ -141,10 +137,32 @@ export function TaskCard({
               forwards `testID` as the web-only `data-testid` prop, which is
               inert in React Native, so neither RNTL nor Maestro can select it.
               AgentStatusIcon needs no wrapper - it draws react-native-svg,
-              which forwards testID properly. */}
+              which forwards testID properly.
+
+              The same wrapper carries the accessibility label, because the
+              glyph alone cannot say which state it is in and the merge verdict
+              has a freshness caveat that has nowhere else to live on a touch
+              surface (no hover, so no tooltip). */}
           {hasPr ? (
-            <View testID={`${testID}-pr`}>
-              <GitPullRequest size={14} color={prStateColor(theme, task.pr_state)} />
+            <View
+              testID={`${testID}-pr`}
+              accessible
+              accessibilityLabel={prChipAccessibilityLabel(task.pr_state, task.pr_merge_readiness)}
+            >
+              {prChip.label === null ? (
+                <GitPullRequest size={14} color={colorForTextRole(prChip.color, theme.colors)} />
+              ) : (
+                // A labeled pill only when readiness has something to say, so
+                // the common card spends no title width. `align="center"`
+                // because this sits in a Row - see BadgeProps.align.
+                <Badge
+                  label={prChip.label}
+                  color={prChip.color}
+                  shape="pill"
+                  align="center"
+                  icon={<GitPullRequest size={11} color={colorForTextRole(prChip.color, theme.colors)} />}
+                />
+              )}
             </View>
           ) : null}
         </Row>
