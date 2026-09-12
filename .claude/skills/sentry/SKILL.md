@@ -206,7 +206,8 @@ its own board.
   path working as designed, not a broken upload. Android Java/Kotlin frames resolve via the R8
   `mapping.txt`, uploaded by the Sentry Android Gradle Plugin. Android native (`.so`) symbols
   are **deliberately never uploaded** - an NDK frame will never resolve; do not read that as a
-  failed upload. iOS dSYMs are wired but not yet round-trip verified against a real crash. A
+  failed upload. iOS dSYMs are round-trip verified: a simulator `Sentry.nativeCrash()` arrived
+  fully named on 2026-09-12 (MOBILE-7); hardware is unverified. A
   `development`-profile build is the debug variant where R8 never ran, so a readable Java frame
   there proves nothing about the mapping upload.
 - **Two known signatures, worth recognizing rather than re-deriving:**

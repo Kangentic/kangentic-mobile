@@ -1954,10 +1954,10 @@ because without it the config plugin is omitted entirely.
 
 | Frames | Mechanism | Wired by | Status |
 |---|---|---|---|
-| JavaScript, both platforms | Hermes source maps | `sentry.gradle` (Android) and an Xcode build phase (iOS) | working, round-trip verified |
+| JavaScript, both platforms | Hermes source maps | `sentry.gradle` (Android) and an Xcode build phase (iOS) | working, round-trip verified on both (iOS on the CI simulator, 2026-09-12: MOBILE-1's iOS event resolves to `src/observability/crashReporting.ts:105`) |
 | Android Java/Kotlin | R8 `mapping.txt` | the Sentry **Android Gradle Plugin**, enabled by `experimental_android.enableAndroidGradlePlugin` in `app.config.ts` | on; needed the moment R8 was enabled |
 | Android native (`.so`) | NDK debug symbols | the same Gradle plugin, `uploadNativeSymbols` and `autoUploadNativeSymbols` | **deliberately off.** The defaults would upload every React Native `.so` on each dispatch build. Both properties flip together in `app.config.ts` if Android native symbolication is ever wanted |
-| iOS native | dSYMs | the plugin's "Upload Debug Symbols to Sentry" Xcode phase | wired, and `build-ios.yml`'s `device` job asserts the Release configuration emits dSYMs (`DEBUG_INFORMATION_FORMAT = dwarf-with-dsym`) so the phase cannot silently upload nothing. That runs on a `target=device` dispatch, not on a PR - `build-ios.yml` is dispatch-only by design. Not yet round-trip verified with a real iOS crash |
+| iOS native | dSYMs | the plugin's "Upload Debug Symbols to Sentry" Xcode phase | wired, and `build-ios.yml`'s `device` job asserts the Release configuration emits dSYMs (`DEBUG_INFORMATION_FORMAT = dwarf-with-dsym`) so the phase cannot silently upload nothing. That runs on a `target=device` dispatch, not on a PR - `build-ios.yml` is dispatch-only by design. **Round-trip verified on the CI simulator, 2026-09-12** (`-f crash_test=true`, run 34674085719): the native crash arrived as MOBILE-7 with every frame named (`+[SentrySDKInternal crash]` inside the app image, React's TurboModule frames, libdispatch and CoreFoundation) and no symbolication error. Hardware is still unverified |
 
 Only the second row is affected by R8. A common misreading is "R8 breaks Sentry"; it does not - it
 renames the Java/Kotlin layer and nothing else, which is exactly what `mapping.txt` undoes.
@@ -2062,9 +2062,9 @@ delivered events read back through the Sentry MCP:
   `RuntimeException` caught by Android's `UncaughtExceptionHandler` (`platform: java`,
   `mechanism: UncaughtExceptionHandler`) - it exercises the "bypasses `beforeSend`" property, but
   it is not a SIGSEGV or other signal caught by sentry-android's NDK handler. No specific reason
-  to expect different breadcrumb/`user.id` behavior on that path, but it was not observed, and
-  iOS native crash reporting was not verified at all (no Mac, no iOS device, and neither CI route
-  produces an interactively-testable signed build).
+  to expect different breadcrumb/`user.id` behavior on that path, but it was not observed. iOS
+  native crash reporting was not verified at the time of that Android verification; it has been
+  since, on the CI simulator rather than hardware - see Finding 1 in the capture audit below.
 
 **Capture audit, 2026-09-11 (task #67).** Read this before re-deriving any of it in a `/sentry`
 sweep. The question was whether the project looked nearly empty because the app is stable or
@@ -2118,7 +2118,25 @@ had little to say, every deliberate catch swallowed, and iOS had never delivered
 - *How a handled event looks, and how to verify one:* dispatch a `crash_test` build, tap "Report
   handled error" in Settings, and read the event back via `/sentry`: `mechanism.handled: true`,
   tags `site=crash-test errorName=CapabilityError verb=read-board`, title
-  `CapabilityError: handled at crash-test`, frames present, and the canary text absent.
+  `CapabilityError: handled at crash-test`, frames present, and the canary text absent. Verified
+  on iOS (MOBILE-6, below); the Android canary has not been dispatched yet.
+- *Finding 1, iOS delivery: proven on the CI simulator, 2026-09-12.* `build-ios.yml -f
+  crash_test=true` (runs 34672597979 and 34674085719: an ad-hoc-signed Release simulator build of
+  `0.6.3+13`, iOS 26.5, iPhone18,1) delivered the first iOS events the project ever received, all
+  under environment `crash-test` and all with `errors` empty: MOBILE-6, the handled canary
+  (`CapabilityError: handled at crash-test`, tags `site`/`errorName`/`verb`, the canary text
+  absent, top in-app frame `src/observability/crashReporting.ts`); MOBILE-1's first iOS event,
+  the JS throw (`mechanism: onerror`, frame `crashReporting.ts:105`); and MOBILE-7, the native
+  crash (`EXC_BREAKPOINT`, `mechanism: mach`, `+[SentrySDKInternal crash]` named inside the app
+  image, 13 images with debug ids). So the DSN, the source-map upload and the dSYM upload all
+  work on iOS, and #69's Step 1 fork resolves the other way: the tester's stored envelope simply
+  never got a launch to ship on. Hardware is the one thing still unverified, and only a
+  TestFlight tester can supply it. Three things learned on the way: a JS-captured event on iOS
+  carries sentry-cocoa's own `started` and `ui.lifecycle` breadcrumbs, which the scrubber now
+  filters (see the rule); a JS event's only `user` field is Sentry's server-side `geo` from the
+  ingest IP, while the native event carries `user.id` exactly as on Android; and the simulator's
+  `.ips` crash reports land in `~/Library/Logs/DiagnosticReports` late or not at all, so the probe
+  gates on the process table rather than on a report.
 
 **The `eas build` fallback is NOT wired for Sentry.** Both values are exported by
 `build-android.yml` and `build-ios.yml` only. `eas.json` deliberately holds neither (that is the

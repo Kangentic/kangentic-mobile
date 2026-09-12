@@ -199,24 +199,28 @@ jobs:
 
       # Both values are inlined at bundle time, so this precedes prebuild too.
       #
-      # The Keychain group is the UN-PREFIXED literal on purpose. A shipped
+      # The Keychain group carries Xcode's PLACEHOLDER team prefix. A shipped
       # build's group is `<TeamID>.com.kangentic.mobile.shared`, composed in
       # the device job from the provisioning profile, because kSecAttrAccessGroup
       # needs the team-prefixed literal and the team id must not be committed.
-      # An ad-hoc simulator build has no team, so `$(AppIdentifierPrefix)` in
-      # both entitlements files should expand to nothing and the group the app
-      # and the extension actually carry is the bare one. That expansion is the
-      # probe's single most uncertain assumption, which is why the step after
-      # the build prints and asserts the entitlement the bundles really carry.
+      # An ad-hoc simulator build has no team, and the first guess here was
+      # that `$(AppIdentifierPrefix)` would therefore expand to nothing. It
+      # does not: run 34674085719's entitlement check read
+      # `application-identifier = FAKETEAMID.com.kangentic.mobile.nse` and
+      # `keychain-access-groups = (FAKETEAMID.com.kangentic.mobile.shared)`
+      # out of the signed bundles, so `FAKETEAMID.` is what Xcode substitutes
+      # for the prefix when no team is set. `FAKETEAMID` is Xcode's own
+      # constant, not anyone's identity. The step after the crash flows keeps
+      # asserting the bundles agree with this literal.
       - name: Export the NSE probe env
         if: env.NSE_PROBE == 'true'
         run: |
           set -euo pipefail
           {
             echo "EXPO_PUBLIC_KANGENTIC_NSE_PROBE=1"
-            echo "EXPO_PUBLIC_KANGENTIC_IOS_KEYCHAIN_GROUP=com.kangentic.mobile.shared"
+            echo "EXPO_PUBLIC_KANGENTIC_IOS_KEYCHAIN_GROUP=FAKETEAMID.com.kangentic.mobile.shared"
           } >> "$GITHUB_ENV"
-          echo "::notice::NSE probe rows are enabled in Settings for this build, and its push key writes target the un-prefixed shared Keychain group. It is a probe, not a distribution artifact."
+          echo "::notice::NSE probe rows are enabled in Settings for this build, and its push key writes target the FAKETEAMID-prefixed shared Keychain group an ad-hoc simulator build carries. It is a probe, not a distribution artifact."
 
       - name: Generate the native iOS project
         # CNG: ios/ is produced here and never committed. See
@@ -852,15 +856,15 @@ jobs:
           echo "Crash reports collected: $(find "$EVIDENCE" -maxdepth 1 -name '*.ips' | wc -l | tr -d ' ')"
           # sentry-cocoa logs through NSLog under the APP's process when
           # `debug: true` (which the crash-test flag turns on), with a
-          # `[Sentry]` prefix. Read from the HOST's unified log, where simulator
-          # processes log as ordinary host processes: two runs of
+          # `[Sentry]` prefix. BEST EFFORT, AND SO FAR EMPTY: two runs of
           # `simctl spawn <sim> log show` returned the simulator's own daemons
-          # regardless of the predicate and none of the app's lines. Matched on
-          # the process image path, which also covers the extension inside
-          # PlugIns/. Counted on the `[Sentry]` prefix, because a plain
-          # case-insensitive "sentry" matched 89 lines of `AssetsEntry` in a
-          # CoreData dump. Evidence, not assertion: the exact strings are
-          # SDK-version-dependent.
+          # regardless of the predicate and none of the app's lines, and one
+          # run of the host's `log show` with this image-path predicate returned
+          # nothing at all (run 34674085719). Neither route has yet captured
+          # the app's lines, and the probe's verdict never depended on them:
+          # the crash is the process table, the delivery is the Sentry read.
+          # Counted on the `[Sentry]` prefix, because a plain case-insensitive
+          # "sentry" matched 89 lines of `AssetsEntry` in a CoreData dump.
           log show --last 30m --style compact \
             --predicate "processImagePath CONTAINS \"$SCHEME.app\"" \
             > "$EVIDENCE/unified-log.txt" 2>&1 || true
@@ -875,11 +879,12 @@ jobs:
       # group on the query), and the app writes with the group the bundle
       # inlined. Both entitlements files spell it `$(AppIdentifierPrefix)` +
       # `com.kangentic.mobile.shared`; on an ad-hoc simulator build with no
-      # team that prefix should expand to nothing, but nothing has verified it.
-      # So: read the entitlements out of BOTH signed bundles, print them (safe:
-      # this job installs no signing material, so no team id can appear), and
-      # fail naming the observed value when it is not the literal the app was
-      # built with. Attempt two then corrects the literal from evidence.
+      # team, Xcode substitutes `FAKETEAMID.` for the prefix (observed on run
+      # 34674085719, which this check caught: the app had been built with the
+      # bare group). So: read the entitlements out of BOTH signed bundles, print
+      # them (safe: this job installs no signing material, so no real team id
+      # can appear), and fail naming the observed value when it is not the
+      # literal the app was built with.
       - name: Verify the shared Keychain group the simulator bundles carry
         if: env.NSE_PROBE == 'true'
         env:

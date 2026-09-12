@@ -404,9 +404,13 @@ configured, and `.claude/rules/crash-reporting-scope.md` is the rule that keeps 
   `user.id` equal to `contexts.device.id`. There is no known JS-reachable fix. This identifier is
   declared in the Play and App Store Connect privacy answers (`docs/store-listing.md`) and
   described, not denied, in `docs/privacy-policy.md`.
-  **Not tested:** a real native (NDK/signal-handler) crash - every observation above came from
-  `Sentry.nativeCrash()`, a Java-uncaught `RuntimeException`, not a SIGSEGV caught by
-  sentry-android's NDK handler; and iOS native crash reporting at all (no Mac, no iOS device).
+  **Not tested:** a real native (NDK/signal-handler) crash on Android - every Android observation
+  above came from `Sentry.nativeCrash()`, a Java-uncaught `RuntimeException`, not a SIGSEGV
+  caught by sentry-android's NDK handler. iOS native crash reporting WAS verified on 2026-09-12,
+  on the CI simulator (`build-ios.yml -f crash_test=true`): there `Sentry.nativeCrash()` is a
+  mach `EXC_BREAKPOINT` caught by sentry-cocoa's signal handler, and its delivered event carried
+  `user.id` and the native `started`/`ui.lifecycle` breadcrumbs exactly as the Android account
+  above predicts. Hardware remains unverified.
 - **What it costs a self-hoster:** nothing. The DSN is injected at build time from a GitHub
   repository variable (`vars.SENTRY_DSN`, not a secret: a DSN ships inside the published bundle
   and is write-only, so it is not confidential) and is never committed, so a build made from this

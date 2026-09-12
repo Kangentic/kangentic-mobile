@@ -858,13 +858,14 @@ describe('build-ios crash-test probe', () => {
       );
     });
 
-    it('exports the probe flag and the UN-prefixed shared Keychain group before prebuild', () => {
-      // Both are EXPO_PUBLIC_* values inlined at bundle time. The group is the
-      // un-prefixed literal on purpose: an ad-hoc simulator build has no team,
-      // so $(AppIdentifierPrefix) in the entitlements expands to nothing, and a
-      // team-prefixed literal (which would also be personal information in a
-      // public workflow) would send the app's writes somewhere the extension
-      // cannot read.
+    it('exports the probe flag and the placeholder-prefixed shared Keychain group before prebuild', () => {
+      // Both are EXPO_PUBLIC_* values inlined at bundle time. The group carries
+      // Xcode's FAKETEAMID placeholder, which is what $(AppIdentifierPrefix)
+      // expands to in an ad-hoc simulator build with no team (run 34674085719
+      // read it out of the signed bundles; the bare group the first attempt
+      // used sent the app's writes somewhere the extension could not read).
+      // A REAL team id is personal information in a public workflow, so the
+      // placeholder is the only ten-character prefix allowed to appear.
       const simulatorJob = readIosJob('simulator');
       const exportIndex = simulatorJob.indexOf('Export the NSE probe env');
       const prebuildIndex = simulatorJob.indexOf('expo prebuild --platform ios');
@@ -873,8 +874,8 @@ describe('build-ios crash-test probe', () => {
       const exportStep = requireStep('simulator', 'Export the NSE probe env');
       expect(exportStep.if).toBe("env.NSE_PROBE == 'true'");
       expect(exportStep.run).toContain('EXPO_PUBLIC_KANGENTIC_NSE_PROBE=1');
-      expect(exportStep.run).toContain('EXPO_PUBLIC_KANGENTIC_IOS_KEYCHAIN_GROUP=com.kangentic.mobile.shared');
-      expect(simulatorJob).not.toMatch(/[A-Z0-9]{10}\.com\.kangentic/);
+      expect(exportStep.run).toContain('EXPO_PUBLIC_KANGENTIC_IOS_KEYCHAIN_GROUP=FAKETEAMID.com.kangentic.mobile.shared');
+      expect(simulatorJob.replace(/FAKETEAMID\./g, '')).not.toMatch(/[A-Z0-9]{10}\.com\.kangentic/);
     });
 
     it('refuses a probe build that is also a TestFlight submission or a screenshot capture', () => {

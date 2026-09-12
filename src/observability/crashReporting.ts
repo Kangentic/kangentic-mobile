@@ -117,9 +117,9 @@ export function crashNatively(): void {
  * This exists because a boundary changes what gets reported, not just what
  * gets rendered: React hands a caught error to the boundary instead of to
  * `ErrorUtils`, so the global handler never sees it. Adding a boundary without
- * this call would trade a visible crash for an invisible one - strictly worse
- * while iOS delivery is still unproven (see the `mobile` project's missing iOS
- * events). So every boundary reports through here.
+ * this call would trade a visible crash for an invisible one - strictly worse,
+ * and it was written while iOS delivery was still unproven (it was proven on
+ * the CI simulator on 2026-09-12). So every boundary reports through here.
  *
  * A no-op when `Sentry.init()` never ran, which is every build made from
  * source. The event still passes through `beforeSend`/`scrubEvent` like any
