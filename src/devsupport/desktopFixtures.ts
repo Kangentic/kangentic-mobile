@@ -63,6 +63,7 @@ export function boardTaskFixture(overrides: Partial<BoardTaskWire> = {}): BoardT
     pr_number: null,
     pr_url: null,
     pr_state: null,
+    pr_merge_readiness: null,
     base_branch: 'main',
     labels: [],
     priority: 0,

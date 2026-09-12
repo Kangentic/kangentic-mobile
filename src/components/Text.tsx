@@ -4,7 +4,16 @@ import { useTheme } from './theme/ThemeProvider';
 import type { TypographyTokens } from './theme/tokens';
 
 export type TextVariant = keyof TypographyTokens;
-export type TextColorRole = 'primary' | 'secondary' | 'muted' | 'accent' | 'danger' | 'warning' | 'success';
+export type TextColorRole =
+  | 'primary'
+  | 'secondary'
+  | 'muted'
+  | 'accent'
+  | 'danger'
+  | 'warning'
+  | 'success'
+  | 'conflict'
+  | 'info';
 
 export interface TextProps extends RNTextProps {
   variant?: TextVariant;
@@ -56,5 +65,9 @@ export function colorForTextRole(role: TextColorRole, colors: ReturnType<typeof 
       return colors.warning;
     case 'success':
       return colors.success;
+    case 'conflict':
+      return colors.conflict;
+    case 'info':
+      return colors.info;
   }
 }

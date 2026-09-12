@@ -266,7 +266,7 @@ function stubTask(id, displayId, title, swimlaneId, position, sessionId) {
   return {
     id, display_id: displayId, title, description: 'Stubbed for manual integration testing.', swimlane_id: swimlaneId, position,
     agent: 'claude', session_id: sessionId, worktree_path: null, branch_name: sessionId ? 'feature/stub-work' : null,
-    pr_number: null, pr_url: null, pr_state: null, base_branch: 'main', labels: [], priority: 0, attachment_count: 0,
+    pr_number: null, pr_url: null, pr_state: null, pr_merge_readiness: null, base_branch: 'main', labels: [], priority: 0, attachment_count: 0,
     archived_at: null, created_at: nowIso(), updated_at: nowIso(),
   };
 }

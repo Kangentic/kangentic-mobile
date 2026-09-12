@@ -41,6 +41,7 @@ describe('accent and semantic colors on the background', () => {
     success: colors.success,
     warning: colors.warning,
     danger: colors.danger,
+    conflict: colors.conflict,
     info: colors.info,
     statusNeedsYou: colors.statusNeedsYou,
     statusWorking: colors.statusWorking,
@@ -91,6 +92,15 @@ describe('two-hue rule', () => {
   it('frees amber from ansiYellow: the yellow slot carries the warning yellow', () => {
     expect(terminalPalette.ansiYellow).toBe(colors.warning);
     expect(terminalPalette.ansiYellow).not.toBe(brandTokens.amber);
+  });
+
+  it('keeps conflict (brand rust) distinct from danger and from amber', () => {
+    // A conflicting PR is stuck, not dead. The whole reason this role exists
+    // instead of reusing danger is that "conflicts" must not read as "closed"
+    // at a glance on a board card; amber is excluded for the usual reason.
+    expect(colors.conflict).toBe(brandTokens.rust);
+    expect(colors.conflict.toLowerCase()).not.toBe(colors.danger.toLowerCase());
+    expect(colors.conflict.toLowerCase()).not.toBe(colors.accent.toLowerCase());
   });
 
   it('never project-overrides the brand identity tokens', () => {

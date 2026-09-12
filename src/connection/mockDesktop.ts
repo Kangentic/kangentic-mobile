@@ -1818,7 +1818,11 @@ export function initialTasks(): BoardTaskWire[] {
       branch_name: 'fix/sign-in-return-path',
       labels: ['auth', 'wave-4'],
       pr_number: 42,
+      pr_url: 'https://github.com/Kangentic/kangentic-mobile/pull/42',
       pr_state: 'open',
+      // The headline verdict: a merge would land right now, so the chip
+      // relabels itself and keeps the open green.
+      pr_merge_readiness: 'ready',
       created_at: nowIso,
       updated_at: nowIso,
     }),
@@ -1832,6 +1836,15 @@ export function initialTasks(): BoardTaskWire[] {
       description: 'Attempts are unbounded today. Cap them per address and per account before the next security review.',
       swimlane_id: 'lane-todo',
       labels: ['chore'],
+      // Carries a PR so the long-press demo card also exercises the sheet's
+      // "View pull request" row. `unknown` is the host having no verdict yet,
+      // which must render as plain open - the same bare glyph as no verdict at
+      // all, so this card is also the check that an unrecognised value adds no
+      // chrome.
+      pr_number: 8,
+      pr_url: 'https://github.com/Kangentic/kangentic-mobile/pull/8',
+      pr_state: 'open',
+      pr_merge_readiness: 'unknown',
       attachment_count: 2,
       created_at: nowIso,
       updated_at: nowIso,
@@ -1853,7 +1866,12 @@ export function initialTasks(): BoardTaskWire[] {
       // the meta row (design-review demo: does the pill still read fine
       // alone, not just alongside label tags).
       pr_number: 17,
+      pr_url: 'https://github.com/Kangentic/kangentic-mobile/pull/17',
       pr_state: 'open',
+      // Conflicts, in rust rather than red: the card next to it is `ready` in
+      // green, so this pair is the at-a-glance test that the two verdicts are
+      // never mistaken for one another - or for a closed PR.
+      pr_merge_readiness: 'conflicting',
       created_at: nowIso,
       updated_at: nowIso,
     }),
@@ -1879,7 +1897,14 @@ export function initialTasks(): BoardTaskWire[] {
       branch_name: 'feature/vault-token-migration',
       labels: ['backend', 'payments', 'migration', 'breaking-change', 'p0'],
       pr_number: 103,
+      pr_url: 'https://github.com/Kangentic/kangentic-mobile/pull/103',
       pr_state: 'merged',
+      // Deliberately a STALE verdict on a merged PR. The desktop stops
+      // refreshing readiness once a PR lands, so this is what the wire really
+      // looks like afterwards, and the card must show the plain merged glyph
+      // with no `ready` label. If this one ever grows a label, readiness has
+      // escaped the open-only branch.
+      pr_merge_readiness: 'ready',
       attachment_count: 3,
       priority: 2,
       created_at: nowIso,
@@ -1897,6 +1922,11 @@ export function initialTasks(): BoardTaskWire[] {
       agent: 'gemini',
       session_id: MOCK_GEMINI_SESSION_ID,
       branch_name: 'fix/reminder-dedupe',
+      pr_number: 88,
+      pr_url: 'https://github.com/Kangentic/kangentic-mobile/pull/88',
+      pr_state: 'open',
+      // A blocking check still in flight - neither a pass nor a fail hue.
+      pr_merge_readiness: 'queued',
       created_at: nowIso,
       updated_at: nowIso,
     }),
@@ -1922,7 +1952,30 @@ export function initialTasks(): BoardTaskWire[] {
       swimlane_id: 'lane-merge',
       branch_name: 'fix/cart-merge-priority',
       pr_number: 63,
+      pr_url: 'https://github.com/Kangentic/kangentic-mobile/pull/63',
       pr_state: 'open',
+      // Waiting on a review or a branch rule: the amber-shaped caution, which
+      // on this palette is the true yellow `warning` rather than the brand
+      // amber (see the two-hue rule in theme/tokens.ts).
+      pr_merge_readiness: 'blocked',
+      created_at: nowIso,
+      updated_at: nowIso,
+    }),
+    boardTaskFixture({
+      id: 'mock-task-merge-2',
+      display_id: 13,
+      // The sixth and last readiness value, so Merge shows the in-flight pair
+      // (`queued` on the Gemini card, `running` here) reading identically to
+      // each other and distinctly from pass and fail.
+      title: 'Retry the webhook delivery before marking it failed',
+      description: 'A single timeout permanently fails the delivery today, so a brief provider blip loses the event.',
+      swimlane_id: 'lane-merge',
+      position: 1,
+      branch_name: 'fix/webhook-retry',
+      pr_number: 71,
+      pr_url: 'https://github.com/Kangentic/kangentic-mobile/pull/71',
+      pr_state: 'open',
+      pr_merge_readiness: 'running',
       created_at: nowIso,
       updated_at: nowIso,
     }),

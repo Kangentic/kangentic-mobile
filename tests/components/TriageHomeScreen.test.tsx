@@ -82,6 +82,7 @@ function seedStores(): void {
             pr_number: null,
             pr_url: null,
             pr_state: null,
+            pr_merge_readiness: null,
             base_branch: null,
             labels: [],
             priority: 0,

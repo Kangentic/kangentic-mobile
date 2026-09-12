@@ -1,6 +1,6 @@
 export { Screen, type ScreenProps } from './Screen';
 export { AppHeader, type AppHeaderProps } from './AppHeader';
-export { Text, type TextProps, type TextVariant, type TextColorRole } from './Text';
+export { Text, colorForTextRole, type TextProps, type TextVariant, type TextColorRole } from './Text';
 export { MonoText, type MonoTextProps, type MonoTextSize } from './MonoText';
 export { Button, type ButtonProps, type ButtonVariant } from './Button';
 export { IconButton, type IconButtonProps, type IconButtonVariant } from './IconButton';

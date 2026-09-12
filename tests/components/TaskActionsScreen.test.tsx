@@ -1,5 +1,6 @@
 import React from 'react';
 import { act, fireEvent, render, screen } from '@testing-library/react-native';
+import type { BoardTaskWire } from '@kangentic/protocol';
 import { ThemeProvider } from '@/components';
 import { TaskActionsScreen } from '@/screens/TaskActionsScreen';
 import { useBoardStore } from '@/state/boardStore';
@@ -18,6 +19,11 @@ jest.mock('expo-router', () => ({
   useRouter: () => ({ replace: mockReplace, back: mockBack, push: jest.fn() }),
 }));
 
+const mockOpenURL = jest.fn().mockResolvedValue(true);
+jest.mock('expo-linking', () => ({
+  openURL: (url: string) => mockOpenURL(url),
+}));
+
 const mockArchiveTask = jest.fn().mockResolvedValue(undefined);
 const mockDeleteTaskFromBoard = jest.fn().mockResolvedValue(undefined);
 jest.mock('@/connection/actions', () => ({
@@ -26,7 +32,13 @@ jest.mock('@/connection/actions', () => ({
 }));
 
 /** `withDoneColumn` decides whether Archive is even possible - it is a move into a done-role column. */
-function seedBoard({ withDoneColumn }: { withDoneColumn: boolean }): void {
+function seedBoard({
+  withDoneColumn,
+  task = {},
+}: {
+  withDoneColumn: boolean;
+  task?: Partial<BoardTaskWire>;
+}): void {
   useBoardStore.setState({
     projects: [{ id: 'project-1', name: 'Alpha' }],
     boardsByProjectId: {
@@ -35,7 +47,9 @@ function seedBoard({ withDoneColumn }: { withDoneColumn: boolean }): void {
           boardColumnFixture({ id: 'lane-todo', name: 'To Do', position: 0 }),
           ...(withDoneColumn ? [boardColumnFixture({ id: 'lane-done', name: 'Done', position: 1, role: 'done' })] : []),
         ],
-        tasksById: { 'task-1': boardTaskFixture({ id: 'task-1', title: 'Fix the login bug', swimlane_id: 'lane-todo' }) },
+        tasksById: {
+          'task-1': boardTaskFixture({ id: 'task-1', title: 'Fix the login bug', swimlane_id: 'lane-todo', ...task }),
+        },
         snapshotAt: 0,
         showTicketNumbers: true,
         view: 'full',
@@ -60,6 +74,81 @@ describe('TaskActionsScreen', () => {
     mockParams = { taskId: 'task-1', projectId: 'project-1' };
     useBoardStore.getState().reset();
     seedBoard({ withDoneColumn: true });
+  });
+
+  describe('View pull request', () => {
+    const linkedPr = {
+      pr_number: 42,
+      pr_url: 'https://github.com/Kangentic/kangentic-mobile/pull/42',
+      pr_state: 'open',
+      pr_merge_readiness: 'conflicting',
+    } satisfies Partial<BoardTaskWire>;
+
+    it('is absent when the task has no linked PR', () => {
+      renderTaskActions();
+      expect(screen.queryByTestId('task-action-view-pr')).toBeNull();
+    });
+
+    it('opens the PR through the OS handler, so an installed GitHub app gets the handoff', () => {
+      seedBoard({ withDoneColumn: true, task: linkedPr });
+      renderTaskActions();
+
+      fireEvent.press(screen.getByTestId('task-action-view-pr'));
+
+      // Assert the argument, not merely that it fired: a row wired to the
+      // wrong task's URL would still "work" under a bare toHaveBeenCalled.
+      expect(mockOpenURL).toHaveBeenCalledWith('https://github.com/Kangentic/kangentic-mobile/pull/42');
+    });
+
+    it('captions itself with the PR number and the same verdict word the card chip uses', () => {
+      seedBoard({ withDoneColumn: true, task: linkedPr });
+      renderTaskActions();
+
+      expect(screen.getByText('#42 - conflicts')).toBeTruthy();
+    });
+
+    it('captions a merged PR without leaking its stale verdict', () => {
+      seedBoard({
+        withDoneColumn: true,
+        task: { ...linkedPr, pr_state: 'merged', pr_merge_readiness: 'ready' },
+      });
+      renderTaskActions();
+
+      expect(screen.getByText('#42 - merged')).toBeTruthy();
+    });
+
+    it('drops the number rather than captioning "#null" when a PR was linked before number tracking', () => {
+      seedBoard({ withDoneColumn: true, task: { ...linkedPr, pr_number: null } });
+      renderTaskActions();
+
+      expect(screen.getByText('conflicts')).toBeTruthy();
+    });
+
+    it('accepts an uppercase scheme, which is case-insensitive, without lowercasing the path', () => {
+      seedBoard({
+        withDoneColumn: true,
+        task: { ...linkedPr, pr_url: 'HTTPS://github.com/Kangentic/Kangentic-Mobile/pull/42' },
+      });
+      renderTaskActions();
+
+      fireEvent.press(screen.getByTestId('task-action-view-pr'));
+
+      expect(mockOpenURL).toHaveBeenCalledWith('HTTPS://github.com/Kangentic/Kangentic-Mobile/pull/42');
+    });
+
+    it.each([
+      ['javascript:alert(1)'],
+      ['http://github.com/Kangentic/kangentic-mobile/pull/42'],
+      ['not a url at all'],
+      ['https://'],
+      [' https://github.com/x/y/pull/1'],
+    ])('refuses to render a row for %s rather than handing it to the opener', (prUrl) => {
+      seedBoard({ withDoneColumn: true, task: { ...linkedPr, pr_url: prUrl } });
+      renderTaskActions();
+
+      expect(screen.queryByTestId('task-action-view-pr')).toBeNull();
+      expect(mockOpenURL).not.toHaveBeenCalled();
+    });
   });
 
   it('titles itself with the task and offers the full lifecycle', () => {

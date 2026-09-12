@@ -91,6 +91,53 @@ describe('TaskCard', () => {
     expect(screen.queryByText('p0')).toBeNull();
   });
 
+  describe('PR merge readiness', () => {
+    it('labels the chip while the PR is open and the verdict says something', () => {
+      renderTaskCard({
+        task: boardTaskFixture({ pr_number: 42, pr_state: 'open', pr_merge_readiness: 'conflicting' }),
+      });
+
+      // Text, not color: a color assertion passes by accident the moment the
+      // token it reads happens to match. The wire says `conflicting`; the card
+      // must say `conflicts`.
+      expect(screen.getByText('conflicts')).toBeTruthy();
+      expect(screen.getByTestId(`${BASE_TEST_ID}-pr`)).toBeTruthy();
+    });
+
+    it('spends no title width on an open PR with no verdict', () => {
+      renderTaskCard({
+        task: boardTaskFixture({ pr_number: 42, pr_state: 'open', pr_merge_readiness: null }),
+      });
+
+      expect(screen.getByTestId(`${BASE_TEST_ID}-pr`)).toBeTruthy();
+      expect(screen.queryByText('open')).toBeNull();
+      expect(screen.queryByText('ready')).toBeNull();
+    });
+
+    it('never shows a stale verdict on a merged PR', () => {
+      // The desktop stops refreshing readiness once a PR lands, so this is
+      // what the wire really looks like afterwards. Seen failing against a
+      // mutation that consulted readiness outside the open branch.
+      renderTaskCard({
+        task: boardTaskFixture({ pr_number: 103, pr_state: 'merged', pr_merge_readiness: 'ready' }),
+      });
+
+      expect(screen.getByTestId(`${BASE_TEST_ID}-pr`)).toBeTruthy();
+      expect(screen.queryByText('ready')).toBeNull();
+    });
+
+    it('reaches a screen reader as its own node, carrying the freshness caveat', () => {
+      // The Card around this is pressable, so an `accessible` View nested
+      // inside it could have been collapsed into the card's own label. This
+      // asserts the node actually resolves rather than assuming it does.
+      renderTaskCard({
+        task: boardTaskFixture({ pr_number: 42, pr_state: 'open', pr_merge_readiness: 'blocked' }),
+      });
+
+      expect(screen.getByLabelText(/as of the last PR refresh/)).toBeTruthy();
+    });
+  });
+
   describe('label overflow', () => {
     const manyLabels = ['backend', 'notifications', 'migration', 'breaking-change', 'p0'];
 
