@@ -3,6 +3,7 @@ import { fireEvent, render, screen } from '@testing-library/react-native';
 import type { ReactTestInstance } from 'react-test-renderer';
 import { ThemeProvider } from '@/components';
 import { TaskCard, type TaskCardProps } from '@/components/board/TaskCard';
+import { PR_READINESS_FRESHNESS_CAVEAT } from '@/components/board/prChipPresentation';
 import { boardTaskFixture, usageFixture } from '@/devsupport/desktopFixtures';
 
 const BASE_TEST_ID = 'task-card';
@@ -134,7 +135,7 @@ describe('TaskCard', () => {
         task: boardTaskFixture({ pr_number: 42, pr_state: 'open', pr_merge_readiness: 'blocked' }),
       });
 
-      expect(screen.getByLabelText(/as of the last PR refresh/)).toBeTruthy();
+      expect(screen.getByLabelText(new RegExp(PR_READINESS_FRESHNESS_CAVEAT))).toBeTruthy();
     });
   });
 

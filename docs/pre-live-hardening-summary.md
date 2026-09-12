@@ -172,7 +172,7 @@ and a transport drop clears the flag before the next handshake. Both paths misse
 forever and looked exactly like a re-handshake that never happened. `SessionManager.onRekey` now
 carries the signal; it reached 1 over the hosted relay with the session intact.
 
-## Protocol 0.10.0, 0.11.0, 0.11.1 and 0.12.0 (published)
+## Protocol 0.10.0, 0.11.0, 0.11.1, 0.12.0 and 0.13.0 (published)
 
 Desktop PR **#209** merged and `@kangentic/protocol` **0.10.0** published via the
 `protocol-v0.10.0` tag. `read-board` gains an `archived` action returning a page of completed
@@ -188,7 +188,8 @@ Additive throughout, so `PROTOCOL_VERSION` stayed at `2` across all of them and 
 changed. Mobile typechecks against the registry copy rather than the dev rig's local link,
 which is what CI actually installs.
 
-**0.12.0** (desktop PR #265) broke that streak, and is the reason the pin now reads `^0.12.0`.
+**0.12.0** (desktop PR #265) broke that streak, and is the reason the pin read `^0.12.0` for as
+long as it did.
 It derives the pairing relay slot from the pairing token (`derivePairingSlotId`) instead of
 dialing the token verbatim as `?slot=`, because the token is simultaneously the Noise `IKpsk0`
 pre-shared key: publishing it in a request URI meant whatever terminates TLS on a hosted relay
@@ -205,6 +206,19 @@ phrasing overstates it.
 **No relay change was needed for any of them, 0.12.0 included.** The relay forwards ciphertext
 only and never parses a capability payload; its slot pattern already accepts 32 hex characters,
 which is what both derived slots now produce, and its frame cap sits far above these payloads.
+
+**0.13.0** returns to additive: `BoardTaskWire.pr_merge_readiness` (a linked PR's normalized
+merge verdict) and `BoardColumnWire.spawns_session`, with `PROTOCOL_VERSION` staying at `3`. The
+pin now reads `^0.13.0`, which matters more than the version alone suggests: a caret on a `0.x`
+version means `>=0.13.0 <0.14.0`, so `^0.12.0` EXCLUDED 0.13.0 outright. A local tarball in
+`node_modules` satisfied the new field while `npm ci` in CI installed 0.12.0 without it, and
+`npm run check:install` cannot see that split, because the installed version still sat inside the
+declared range. The lockfile diff was the only evidence.
+
+The version was also bumped in the desktop repo months before it was ever tagged, so the package
+sat unpublished while mobile developed against that tarball. `/release-protocol` skips its own
+version-bump step in exactly this case; what was missing was the changelog entry, the
+`protocol-v0.13.0` tag, and the push that triggers `publish-protocol.yml`.
 
 ## The relay-address hole, closed at the source
 

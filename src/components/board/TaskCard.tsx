@@ -57,7 +57,7 @@ export interface TaskCardProps {
   projectName?: string | null;
   /**
    * Whether to render board/backlog reference chrome: the labels row and
-   * the title row's PR-state icon (same category as the ticket number).
+   * the title row's PR chip (same category as the ticket number).
    * Defaults true (the board).
    */
   showMetaRow?: boolean;
@@ -69,7 +69,7 @@ export interface TaskCardProps {
 
 /**
  * The task card shared by the board and the Agents feed: status icon,
- * title (with a PR-state icon and ticket number sharing its row), a body
+ * title (with a PR chip and ticket number sharing its row), a body
  * line, the labels row, and the context-usage bar - the two screens render
  * nearly identical cards; the Agents feed's only addition is the project
  * name sharing the title row.
@@ -102,8 +102,9 @@ export function TaskCard({
   const visibleLabels = task.labels.slice(0, visibleLabelCount);
   const hiddenLabelCount = task.labels.length - visibleLabels.length;
   // Existence + state is what matters here (it decides whether the task is
-  // ready to move to Done), not the PR number - a bare icon on the title
-  // row says that without adding another stacked row of chrome. The number
+  // ready to move to Done), not the PR number - a chip on the title row says
+  // that without adding another stacked row of chrome: a bare glyph at rest,
+  // growing a word only when merge readiness has something to say. The number
   // itself is one tap away in the detail view.
   const hasPr = showMetaRow && task.pr_number !== null;
   const prChip = prChipPresentation(task.pr_state, task.pr_merge_readiness);
@@ -147,6 +148,7 @@ export function TaskCard({
             <View
               testID={`${testID}-pr`}
               accessible
+              accessibilityRole="text"
               accessibilityLabel={prChipAccessibilityLabel(task.pr_state, task.pr_merge_readiness)}
             >
               {prChip.label === null ? (
