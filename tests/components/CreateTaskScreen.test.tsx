@@ -54,6 +54,13 @@ jest.mock('@/connection/actions', () => ({
   createTask: (input: unknown) => mockCreateTask(input),
 }));
 
+// The handled-error door: asserted with the rejected instance on failure and
+// absent on success. The arrow forwards its arguments on purpose.
+const mockReportHandledError = jest.fn();
+jest.mock('@/observability/crashReporting', () => ({
+  reportHandledError: (site: string, error: unknown) => mockReportHandledError(site, error),
+}));
+
 function seedBoard(): void {
   useBoardStore.setState({
     projects: [{ id: 'project-1', name: 'Alpha' }],
@@ -112,6 +119,7 @@ describe('CreateTaskScreen', () => {
     // Dismissing IS router.back() now: the sheet is a route, so there is no
     // visible prop for anything to leave stuck open.
     expect(mockBack).toHaveBeenCalled();
+    expect(mockReportHandledError).not.toHaveBeenCalled();
   });
 
   it('sends the tapped column, and offers Backlog alongside the real ones', async () => {
@@ -158,9 +166,10 @@ describe('CreateTaskScreen', () => {
     });
   });
 
-  /** A failed create keeps the sheet open with the reason, so the typing is not lost. */
+  /** A failed create keeps the sheet open with the reason, so the typing is not lost, and reports through the door. */
   it('surfaces a failure and stays open', async () => {
-    mockCreateTask.mockRejectedValueOnce(new Error('relay down'));
+    const failure = new Error('relay down');
+    mockCreateTask.mockRejectedValueOnce(failure);
     renderCreateTaskScreen();
 
     fireEvent.changeText(screen.getByTestId('create-task-title'), 'New feature');
@@ -171,6 +180,7 @@ describe('CreateTaskScreen', () => {
     expect(screen.getByText('Create failed - check the connection')).toBeTruthy();
     expect(mockBack).not.toHaveBeenCalled();
     expect(screen.getByTestId('create-task-title').props.value).toBe('New feature');
+    expect(mockReportHandledError).toHaveBeenCalledWith('create-task', failure);
   });
 });
 

@@ -351,16 +351,22 @@ configured, and `.claude/rules/crash-reporting-scope.md` is the rule that keeps 
 
 - **What Sentry cannot see:** session content. No screenshots, no view hierarchy, no console
   output, no captured network requests, no JS network breadcrumbs, no Session Replay, no
-  performance traces, no structured logs, and no PII - each disabled explicitly, several of them
-  ON by default in the SDK. Screenshots and view hierarchy are the two that reach native, and
-  both are off there too. Transcripts, terminal output,
-  diff content, board data, pairing material and notification payloads are never collected, and
-  `src/pairing/`, `src/channel/` and `src/notifications/` are forbidden by lint from reporting to
-  Sentry at all, because their error messages can echo ciphertext, key material, or
+  performance traces, no structured logs, no PII, and no message text from a failure the app
+  caught and showed you - each disabled explicitly, several of them ON by default in the SDK.
+  Screenshots and view hierarchy are the two that reach native, and both are off there too.
+  Transcripts, terminal output, diff content, board data, pairing material and notification
+  payloads are never collected, and `src/pairing/`, `src/channel/`, `src/demo/`,
+  `src/devsupport/`, `src/notifications/` and `app/+native-intent.ts` are forbidden by lint (and
+  by a source scan that also covers `require()` and dynamic `import()`) from reporting to Sentry
+  at all, because their error messages can echo ciphertext, key material, or
   attacker-controlled bytes (see `src/notifications/pushDecrypt.ts`).
 - **What Sentry can see:** that this app crashed, where in the code, and on what kind of device.
   A stack trace, the exception type and message, app version, and the SDK's standard device and
-  OS context. That context is wider than model and OS version alone: it is the platform's normal
+  OS context. For a failure the app caught and handled, strictly less: which part of the app
+  caught it (a fixed site label), the error's class name, the capability verb if one was
+  involved, and the stack frames - never the message, which is replaced by the site label
+  before the SDK sees it (`reportHandledError` in `src/observability/crashReporting.ts`).
+  That context is wider than model and OS version alone: it is the platform's normal
   diagnostic block, and includes things like battery level, free memory and storage, screen
   resolution, orientation, and device timezone. None of it is session content, none of it is an
   account, and it is not used to profile a user, but "device model and OS" understates it and
@@ -411,16 +417,26 @@ configured, and `.claude/rules/crash-reporting-scope.md` is the rule that keeps 
   `app/_layout.tsx`), and that makes reporting MORE load-bearing rather than less: React hands a
   caught error to the boundary instead of to `ErrorUtils`, so the global handler never sees it.
   `reportCaughtError` in `src/observability/crashReporting.ts` is the capture path that stops a
-  boundary trading a visible crash for an invisible one.
+  boundary trading a visible crash for an invisible one. `reportHandledError`, beside it, is the
+  door for failures the app catches and shows the user (a failed send, a failed create, an
+  archived read the desktop refused, a Keychain read that fell back to "unpaired"): before it
+  existed, a "Create failed" the user saw was invisible here, and every deliberate catch in the
+  app swallowed. It forwards no message text, only the site, the class name, a verb and the
+  frames.
 - **Degradation:** entirely optional and entirely absent when unconfigured. There is no runtime
   dependency on it, no user-facing behaviour attached to it, and no failure mode if Sentry is
   unreachable.
 
-Two things are deliberately off and are worth naming because they would each be a defensible
-default elsewhere. **Session tracking** is disabled: it produces crash-free rate, a genuinely
-useful stability metric, but it is a per-foreground ping and therefore usage telemetry, which
-this app tells users it does not collect. **Sampling** is not used; every error is sent, because
-the volume is low and the free tier's budget is better spent on completeness than on smoothing.
+Four things are deliberately off and are worth naming because they would each be a defensible
+default elsewhere; all four were re-confirmed as keep-off by the 2026-09-11 capture audit, whose
+per-control consequences are recorded in the crash reporting section of
+`docs/developer-guide.md`. **Session tracking** is disabled: it produces crash-free rate, a
+genuinely useful stability metric, but it is a per-foreground ping and therefore usage
+telemetry, which this app tells users it does not collect. **A user identifier** is stripped
+from every JS-captured event (`scrubEvent`); the native per-install identifier above is
+disclosed, not added to. **Captured failed requests** are off, because the capture carries
+request URLs. **Sampling** is not used; every error is sent, because the volume is low and the
+free tier's budget is better spent on completeness than on smoothing.
 
 The exit path, if this ever becomes unacceptable: delete the `SENTRY_DSN` repository variable
 (GitHub Settings, Variables rather than Secrets) and the SDK goes inert across every build with

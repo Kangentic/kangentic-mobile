@@ -18,6 +18,7 @@ import {
 } from '@/state/boardStore';
 import { useActivityStore, sectionForEntry } from '@/state/activityStore';
 import { ARCHIVED_PAGE_SIZE, loadArchivedTasks, openProjectBoard, refreshSnapshots } from '@/connection/actions';
+import { reportHandledError } from '@/observability/crashReporting';
 
 /** One shared empty array so a task-less column does not hand FlashList a new `data` identity per render. */
 const NO_TASKS: BoardTaskWire[] = [];
@@ -28,9 +29,12 @@ const NO_TASKS: BoardTaskWire[] = [];
  * column is the right answer there. Silence is NOT the right answer to the
  * developer, though: an empty column looks identical whether the desktop said
  * "no completed tasks" or "I do not know that verb", and telling those apart
- * by hand costs an afternoon. Dev-only, so a shipped app stays quiet.
+ * by hand costs an afternoon. The console line is dev-only; the handled-error
+ * door is what a shipped build sends, and a CapabilityError with verb
+ * `read-board` is the old-desktop signature its `verb` tag counts.
  */
 function reportArchivedFetchFailure(error: unknown): void {
+  reportHandledError('board-archived-read', error);
   if (__DEV__) console.warn('[board] archived tasks unavailable:', error);
 }
 

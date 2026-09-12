@@ -130,6 +130,11 @@ vi.mock('@/connection/mockDesktop', async () => {
  */
 const platformMock = vi.hoisted(() => ({ OS: 'android' as 'android' | 'ios' }));
 
+// The handled-error door: its real module imports @sentry/react-native, whose
+// wrapper reads NativeModules.RNSentry at import time - absent from the
+// minimal react-native stub below - so it is stubbed inert here.
+vi.mock('@/observability/crashReporting', () => ({ reportHandledError: vi.fn() }));
+
 vi.mock('react-native', () => ({
   AppState: {
     currentState: 'active',

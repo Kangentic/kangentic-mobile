@@ -21,7 +21,7 @@ import {
   setRetentionProbeVariant,
   useRetentionProbeVariant,
 } from '@/devsupport/retentionProbe';
-import { crashNatively, crashTestEnabled, throwTestError } from '@/observability/crashReporting';
+import { crashNatively, crashTestEnabled, reportHandledTestError, throwTestError } from '@/observability/crashReporting';
 import { useChannelStore } from '@/state/channelStore';
 import {
   useSettingsStore,
@@ -360,6 +360,18 @@ export function SettingsScreen(): React.JSX.Element {
                 >
                   <Text variant="body" color="primary">
                     Crash natively
+                  </Text>
+                  <Icon name="chevron-forward" color="muted" size={16} />
+                </Pressable>
+                <RowDivider />
+                <Pressable
+                  accessibilityRole="button"
+                  testID="settings-crash-test-handled"
+                  onPress={reportHandledTestError}
+                  style={({ pressed }) => [styles.linkRow, { minHeight: theme.minTouchSize, opacity: pressed ? 0.7 : 1 }]}
+                >
+                  <Text variant="body" color="primary">
+                    Report handled error
                   </Text>
                   <Icon name="chevron-forward" color="muted" size={16} />
                 </Pressable>

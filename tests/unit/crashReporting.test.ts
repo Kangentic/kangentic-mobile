@@ -416,6 +416,252 @@ describe('reportCaughtError', () => {
   });
 });
 
+/**
+ * The handled-error door. Every assertion here is a privacy claim as much as a
+ * behaviour: the caught error may be a CapabilityError whose message is the
+ * desktop's verbatim text, a Keychain error, or a relay-transport string, and
+ * the door's contract is that NONE of that leaves the device - only the site,
+ * the class name, a protocol verb, and the stack frames.
+ */
+describe('reportHandledError', () => {
+  const originalDsn = process.env.EXPO_PUBLIC_SENTRY_DSN;
+  const originalE2eFlag = process.env.EXPO_PUBLIC_KANGENTIC_E2E;
+  const originalCrashTestFlag = process.env.EXPO_PUBLIC_KANGENTIC_CRASHTEST;
+
+  beforeEach(() => {
+    sentryState.captureException.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    setSentryDsn(originalDsn);
+    setE2eFlag(originalE2eFlag);
+    setCrashTestFlag(originalCrashTestFlag);
+  });
+
+  /** A fresh module instance with Sentry.init already run, so the door is live. */
+  async function loadInitialisedCrashReporting(): Promise<typeof import('@/observability/crashReporting')> {
+    setSentryDsn(testDsn);
+    setE2eFlag(undefined);
+    setCrashTestFlag(undefined);
+    vi.stubGlobal('__DEV__', false);
+    const crashReporting = await loadFreshCrashReporting();
+    crashReporting.initializeCrashReporting();
+    return crashReporting;
+  }
+
+  interface CapturedCall {
+    error: Error;
+    context: { tags?: Record<string, string>; fingerprint?: string[] };
+  }
+
+  function capturedCall(index = 0): CapturedCall {
+    const call = sentryState.captureException.mock.calls[index];
+    if (call === undefined) throw new Error(`Sentry.captureException call ${index} was not made`);
+    return { error: call[0] as Error, context: (call[1] ?? {}) as CapturedCall['context'] };
+  }
+
+  /**
+   * Everything the SDK was handed, flattened to text, so a test can assert a
+   * secret string appears NOWHERE in the call - not in the message, not in
+   * the stack, not in a tag, not in a `cause`. JSON.stringify alone drops an
+   * Error's own properties, which is exactly where the text would hide.
+   */
+  function capturedCallText(index = 0): string {
+    const call = sentryState.captureException.mock.calls[index];
+    return JSON.stringify(call, (_key, value: unknown) => {
+      if (value instanceof Error) {
+        return { ...value, name: value.name, message: value.message, stack: value.stack, cause: value.cause };
+      }
+      return value;
+    });
+  }
+
+  function capabilityErrorLike(message: string, verb: string): Error {
+    return Object.assign(new Error(message), { name: 'CapabilityError', verb });
+  }
+
+  it('does not call Sentry.captureException when the module never initialised', async () => {
+    setSentryDsn(undefined);
+    vi.stubGlobal('__DEV__', false);
+    const crashReporting = await loadFreshCrashReporting();
+
+    crashReporting.reportHandledError('create-task', new Error('anything'));
+
+    expect(sentryState.captureException).not.toHaveBeenCalled();
+  });
+
+  it('captures a synthetic error, never the original object or its message', async () => {
+    const crashReporting = await loadInitialisedCrashReporting();
+    const original = capabilityErrorLike('peer-supplied text from the desktop', 'board-tool-write');
+    original.cause = new Error('a cause with more peer text');
+
+    crashReporting.reportHandledError('create-task', original);
+
+    expect(sentryState.captureException).toHaveBeenCalledTimes(1);
+    const { error } = capturedCall();
+    expect(error).not.toBe(original);
+    expect(error.message).toBe('handled at create-task');
+    expect(error.name).toBe('CapabilityError');
+    expect(capturedCallText()).not.toContain('peer');
+  });
+
+  it('keeps only the stack frames of the original, not its header line', async () => {
+    const crashReporting = await loadInitialisedCrashReporting();
+    const original = capabilityErrorLike('secret', 'read-board');
+    original.stack = 'CapabilityError: secret\n    at requireOk (a:1:2)\n    at foo (a:3:4)';
+
+    crashReporting.reportHandledError('board-archived-read', original);
+
+    expect(capturedCall().error.stack).toBe('    at requireOk (a:1:2)\n    at foo (a:3:4)');
+    expect(capturedCallText()).not.toContain('secret');
+  });
+
+  it('drops a frame line smuggled inside the message', async () => {
+    // Hermes formats `stack` as the header (`name: message`) followed by the
+    // frames, so a message that itself contains a newline and a fake `at`
+    // line would otherwise parse into a frame carrying arbitrary text.
+    const crashReporting = await loadInitialisedCrashReporting();
+    const original = new Error('x\n    at evil (http://x/y.js:1:1)');
+    original.stack = 'Error: x\n    at evil (http://x/y.js:1:1)\n    at real (a:1:1)';
+
+    crashReporting.reportHandledError('composer-send', original);
+
+    expect(capturedCall().error.stack).toBe('    at real (a:1:1)');
+    expect(capturedCallText()).not.toContain('evil');
+  });
+
+  it('tags the site, the error class name and a protocol verb', async () => {
+    const crashReporting = await loadInitialisedCrashReporting();
+
+    crashReporting.reportHandledError('create-task', capabilityErrorLike('peer text', 'board-tool-write'));
+
+    expect(capturedCall().context.tags).toEqual({
+      site: 'create-task',
+      errorName: 'CapabilityError',
+      verb: 'board-tool-write',
+    });
+  });
+
+  it('omits the verb tag when the field is not one of the protocol verbs', async () => {
+    // The verb is a closed union in @kangentic/protocol, so it is safe to tag;
+    // an arbitrary string on a `verb` field is not, and must not ride along.
+    const crashReporting = await loadInitialisedCrashReporting();
+
+    crashReporting.reportHandledError('create-task', capabilityErrorLike('peer text', 'rm -rf /'));
+
+    expect(capturedCall().context.tags).toEqual({ site: 'create-task', errorName: 'CapabilityError' });
+    expect(capturedCallText()).not.toContain('rm -rf');
+  });
+
+  it('fingerprints on the site, class name and verb, never on the message', async () => {
+    const crashReporting = await loadInitialisedCrashReporting();
+
+    crashReporting.reportHandledError('create-task', capabilityErrorLike('peer text one', 'board-tool-write'));
+    crashReporting.reportHandledError('composer-send', new Error('some other text'));
+
+    expect(capturedCall(0).context.fingerprint).toEqual(['handled', 'create-task', 'CapabilityError', 'board-tool-write']);
+    expect(capturedCall(1).context.fingerprint).toEqual(['handled', 'composer-send', 'Error', '']);
+  });
+
+  it('excludes the normal-condition error classes by name', async () => {
+    // A phone with no channel is not a defect. Matched by name rather than
+    // instanceof because importing the classes would cycle through
+    // src/connection, which imports this module.
+    const crashReporting = await loadInitialisedCrashReporting();
+
+    crashReporting.reportHandledError('composer-send', Object.assign(new Error('x'), { name: 'NotConnectedError' }));
+    crashReporting.reportHandledError('composer-send', Object.assign(new Error('x'), { name: 'ChannelDisconnectedError' }));
+
+    expect(sentryState.captureException).not.toHaveBeenCalled();
+  });
+
+  it('excludes the expected transport noise by the ORIGINAL message, since the synthetic one defeats ignoreErrors', async () => {
+    const crashReporting = await loadInitialisedCrashReporting();
+
+    crashReporting.reportHandledError('composer-send', new Error('Network request failed'));
+    crashReporting.reportHandledError('composer-send', new Error('Relay connection closed before it opened'));
+    crashReporting.reportHandledError('composer-send', new Error('RelayTransport.send() called while not connected'));
+
+    expect(sentryState.captureException).not.toHaveBeenCalled();
+  });
+
+  it('rate-limits one report per site and class per minute, without blocking a different site', async () => {
+    vi.useFakeTimers();
+    const crashReporting = await loadInitialisedCrashReporting();
+
+    crashReporting.reportHandledError('create-task', new Error('one'));
+    crashReporting.reportHandledError('create-task', new Error('two'));
+    expect(sentryState.captureException).toHaveBeenCalledTimes(1);
+
+    crashReporting.reportHandledError('composer-send', new Error('three'));
+    expect(sentryState.captureException).toHaveBeenCalledTimes(2);
+
+    vi.advanceTimersByTime(60_000);
+    crashReporting.reportHandledError('create-task', new Error('four'));
+    expect(sentryState.captureException).toHaveBeenCalledTimes(3);
+  });
+
+  it('caps a site and class at ten reports per launch, whatever the spacing', async () => {
+    vi.useFakeTimers();
+    const crashReporting = await loadInitialisedCrashReporting();
+
+    for (let attempt = 0; attempt < 11; attempt += 1) {
+      crashReporting.reportHandledError('create-task', new Error(`attempt ${attempt}`));
+      vi.advanceTimersByTime(61_000);
+    }
+
+    expect(sentryState.captureException).toHaveBeenCalledTimes(10);
+  });
+
+  it('never forwards a non-Error value', async () => {
+    const crashReporting = await loadInitialisedCrashReporting();
+
+    crashReporting.reportHandledError('composer-send', 'a thrown string carrying secrets');
+
+    const { error, context } = capturedCall();
+    expect(error.message).toBe('handled at composer-send');
+    expect(error.name).toBe('NonError');
+    expect(context.tags).toEqual({ site: 'composer-send', errorName: 'NonError' });
+    expect(capturedCallText()).not.toContain('secrets');
+  });
+
+  it('falls back to a generic class name when the original name is not an identifier', async () => {
+    const crashReporting = await loadInitialisedCrashReporting();
+
+    crashReporting.reportHandledError('composer-send', Object.assign(new Error('x'), { name: 'evil name with spaces' }));
+
+    expect(capturedCall().error.name).toBe('Error');
+    expect(capturedCall().context.tags).toEqual({ site: 'composer-send', errorName: 'Error' });
+    expect(capturedCallText()).not.toContain('evil');
+  });
+
+  it('never throws into the failing path, even when the SDK does', async () => {
+    const crashReporting = await loadInitialisedCrashReporting();
+    sentryState.captureException.mockImplementationOnce(() => {
+      throw new Error('sdk exploded');
+    });
+
+    expect(() => crashReporting.reportHandledError('composer-send', new Error('x'))).not.toThrow();
+  });
+
+  it('reportHandledTestError reports the canary with its site, class and verb, and without its text', async () => {
+    // The Settings crash-test row that proves the redaction against a
+    // DELIVERED payload: the canary's message must not arrive in Sentry.
+    const crashReporting = await loadInitialisedCrashReporting();
+
+    crashReporting.reportHandledTestError();
+
+    expect(sentryState.captureException).toHaveBeenCalledTimes(1);
+    const { error, context } = capturedCall();
+    expect(error.message).toBe('handled at crash-test');
+    expect(error.name).toBe('CapabilityError');
+    expect(context.tags).toEqual({ site: 'crash-test', errorName: 'CapabilityError', verb: 'read-board' });
+    expect(capturedCallText()).not.toContain('MUST NOT ARRIVE');
+  });
+});
+
 describe('crashNatively', () => {
   beforeEach(() => {
     sentryState.nativeCrash.mockClear();

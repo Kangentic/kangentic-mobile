@@ -10,6 +10,33 @@ interface PendingRequest {
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 /**
+ * The transport left `connected` (or the client was disposed) with this
+ * request in flight. A normal phone condition, not a defect: the
+ * handled-error door in src/observability excludes it by NAME, which is why
+ * the name is a literal and must stay in step with that list.
+ */
+export class ChannelDisconnectedError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = 'ChannelDisconnectedError';
+  }
+}
+
+/**
+ * The desktop did not answer within the verb's timeout. Carries the verb as
+ * a field so the handled-error door can tag it without reading the message.
+ */
+export class CapabilityTimeoutError extends Error {
+  readonly verb: CapabilityVerb;
+
+  constructor(verb: CapabilityVerb) {
+    super(`Capability request "${verb}" timed out`);
+    this.name = 'CapabilityTimeoutError';
+    this.verb = verb;
+  }
+}
+
+/**
  * Request/response correlation over a SessionManager's BridgeMessage
  * stream. Request ids do not survive a fresh handshake (see
  * SessionManager.reset()) - callers should re-issue a request after a
@@ -44,7 +71,7 @@ export class CapabilityClient {
     return new Promise<CapabilityResponseMessage>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(requestId);
-        reject(new Error(`Capability request "${verb}" timed out`));
+        reject(new CapabilityTimeoutError(verb));
       }, timeoutMs);
       this.pending.set(requestId, { resolve, reject, timeout });
 
@@ -62,7 +89,7 @@ export class CapabilityClient {
   rejectAllPending(reason: string): void {
     for (const entry of this.pending.values()) {
       clearTimeout(entry.timeout);
-      entry.reject(new Error(reason));
+      entry.reject(new ChannelDisconnectedError(reason));
     }
     this.pending.clear();
   }

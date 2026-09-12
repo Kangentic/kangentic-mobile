@@ -190,6 +190,15 @@ its own board.
   `request`, `extra`, or `server_name` at all - `scrubEvent` strips them, and `beforeSend`
   never runs for a native-captured event in the first place. So: an event carrying `user` was
   captured natively; one without was captured in JS.
+- **Handled vs uncaught, one-field discriminator.** An event from the handled-error door
+  (`reportHandledError` in `crashReporting.ts`) has `mechanism.handled: true` (`type: generic`),
+  tags `site`, `errorName` and, for a capability error, `verb`, a title of the form
+  `<errorName>: handled at <site>`, and fingerprint `handled|<site>|<errorName>|<verb>`. The
+  message is deliberately NOT the original: it is replaced before the SDK sees it, so diagnose
+  from the three tags and the frames, and never file "the message is missing" as a bug. Counts
+  are lower bounds (one report per site, class and verb per minute, ten per launch, plus the
+  SDK's Dedupe). `is:unresolved handled:yes` narrows a query to door events. The `crash-test`
+  site is the Settings canary, never a user's failure.
 - **Symbolication is four independent paths, all gated on the build's `SENTRY_AUTH_TOKEN`.**
   JS frames (both platforms) resolve only for a release whose Hermes sourcemaps were uploaded
   by the `@sentry/react-native` build integration; an unsymbolicated frame shows the constant

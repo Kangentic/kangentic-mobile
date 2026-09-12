@@ -75,7 +75,7 @@ describe('eslint.config.mjs: no-restricted-imports ordering (defect A)', () => {
     async () => {
       const fired = await ruleFired(
         'src/channel/probe.ts',
-        "import { initCrashReporting } from '@/observability/crashReporting';\n",
+        "import { reportHandledError } from '@/observability/crashReporting';\n",
         NO_RESTRICTED_IMPORTS,
       );
       expect(fired).toBe(true);
@@ -211,6 +211,50 @@ describe('eslint.config.mjs: expo-router router import confinement (imperative-r
         NO_RESTRICTED_IMPORTS,
       );
       expect(fired).toBe(false);
+    },
+    15000,
+  );
+});
+
+/**
+ * The handled-error door (`reportHandledError` in src/observability/) is
+ * callable from the directories that render or drive the UI and NEVER from
+ * the directories whose error messages can carry ciphertext or peer bytes.
+ * The negative half already existed for src/channel and src/notifications;
+ * this pins the other four banned entries, and the positive half, which no
+ * test asserted: a zone entry ordered wrongly could silently ban the door
+ * from every screen and read as "nothing calls it" rather than as a lint bug.
+ */
+describe('eslint.config.mjs: handled-error door reachability (crash-reporting-scope.md)', () => {
+  const doorImport = "import { reportHandledError } from '@/observability/crashReporting';\n";
+  const TS_NO_RESTRICTED_IMPORTS = '@typescript-eslint/no-restricted-imports';
+
+  it.each(['src/screens/probe.tsx', 'src/components/probe.tsx', 'src/connection/probe.ts', 'src/state/probe.ts'])(
+    'lets %s import the door',
+    async (filePath) => {
+      expect(await ruleFired(filePath, doorImport, NO_RESTRICTED_IMPORTS)).toBe(false);
+      expect(await ruleFired(filePath, doorImport, TS_NO_RESTRICTED_IMPORTS)).toBe(false);
+    },
+    15000,
+  );
+
+  it.each(['src/pairing/probe.ts', 'src/demo/probe.ts', 'src/devsupport/probe.ts', 'app/+native-intent.ts'])(
+    'bans the door from %s',
+    async (filePath) => {
+      expect(await ruleFired(filePath, doorImport, NO_RESTRICTED_IMPORTS)).toBe(true);
+    },
+    15000,
+  );
+
+  it(
+    'still bans the SDK itself from a screen - the door is the only thing a screen may reach',
+    async () => {
+      const fired = await ruleFired(
+        'src/screens/probe.tsx',
+        "import * as Sentry from '@sentry/react-native';\n",
+        TS_NO_RESTRICTED_IMPORTS,
+      );
+      expect(fired).toBe(true);
     },
     15000,
   );

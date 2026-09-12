@@ -5,6 +5,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Button, SheetScrollerSlot, Stack, Text, TextField, useTheme } from '@/components';
 import { CapabilityError } from '@/channel';
 import { createTask } from '@/connection/actions';
+import { reportHandledError } from '@/observability/crashReporting';
 import { selectColumnsOrdered, useBoardStore } from '@/state/boardStore';
 import { triggerHaptic } from '@/lib/haptics';
 import {
@@ -104,6 +105,7 @@ export function CreateTaskScreen(): React.JSX.Element {
         router.back();
       })
       .catch((error: unknown) => {
+        reportHandledError('create-task', error);
         setErrorMessage(error instanceof CapabilityError ? error.message : 'Create failed - check the connection');
       })
       .finally(() => setCreateInFlight(false));

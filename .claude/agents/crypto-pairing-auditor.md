@@ -79,6 +79,13 @@ in `docs/security.md`:
 14. **Security-doc claims are accurate.** Flag any comment or doc string that overclaims what
     the relay can or cannot see, or that omits a known limitation (e.g. the relay's metadata
     visibility, the iOS Secure Enclave P-256 limitation).
+15. **Crash reporting stays behind its one door** (see `crash-reporting-scope.md`). No
+    `@sentry/*` or `@/observability` import, `require()` or dynamic `import()` in `src/pairing/`,
+    `src/channel/`, `src/demo/`, `src/devsupport/`, `src/notifications/` or
+    `app/+native-intent.ts`. Any `reportHandledError` call passes a `HandledErrorSite` literal
+    and the caught error, never anything derived from `error.message`, and never sits in a
+    pairing or handshake catch even on a screen. Any new `Sentry.init()` option, or a relaxed
+    one, is in scope.
 
 ## Output Format
 

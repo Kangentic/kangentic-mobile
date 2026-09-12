@@ -268,6 +268,11 @@ two entries, App Store Connect takes four, because Apple splits Diagnostics into
   is a data TYPE in Play's taxonomy, sitting next to Crash logs, not a purpose. Crash reporting
   therefore has to be declared under App functionality plus Analytics, which is what the
   submitted form carries.
+
+  Reports of failures the app caught and handled itself (`reportHandledError`, added by the
+  2026-09-11 capture audit) fall under this same entry, and under Apple's Crash Data below: they
+  are the same data class with strictly less content, since the error message is replaced by a
+  fixed site label before it leaves the device. No new entry on either store is needed for them.
 - **Device or other IDs.** Collected: **yes**. sentry-android attaches a per-install identifier
   on its own (`contexts.device.id`) and, on a crash the operating system catches rather than the
   app's own code, additionally promotes it into `user.id` - the `user.id` half confirmed by

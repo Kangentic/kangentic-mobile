@@ -1189,7 +1189,8 @@ published bundle, so it is not confidential, and a variable can be read back to 
 project a build is wired to. Both are optional and gated together on a job-level `HAS_SENTRY`:
 without both, the build ships with crash reporting inert and uploads no symbols, and says so in
 the log. They are the only build-time env deliberately kept out of `eas.json` - see the Crash
-reporting section for why.
+reporting section for why. Confirmed live in production Android builds by the 2026-09-11
+capture audit: the `0.6.2+10` release's events carry `environment: production`.
 
 The iOS secrets are optional in the same way: with none of them, dispatch with `target=simulator`
 for the unsigned check. A `device` build fails immediately and says which secret is missing, rather
@@ -1218,12 +1219,15 @@ signature. A green build that quietly produced an unsignable artifact is the exp
 mode, because Play only rejects it after a human has spent the upload.
 
 **Triggering an iOS build.** Actions -> Build iOS -> Run workflow, or
-`gh workflow run build-ios.yml -f target=device -f submit=testflight`. Two inputs:
+`gh workflow run build-ios.yml -f target=device -f submit=testflight`. Five inputs:
 
 | Input | Meaning |
 |---|---|
 | `target` | `simulator` (default) is the unsigned compile check, needs no secrets. `device` archives, signs, and exports an `.ipa`. `both` runs the two jobs in parallel. |
 | `submit` | `none` (default) keeps the `.ipa` as a run artifact. `testflight` uploads it to App Store Connect. |
+| `maestro` | `none` (default). `smoke` installs Maestro's iOS driver and runs `.maestro/smoke.yaml` against the simulator the launch step booted. EXPERIMENTAL, see the job comment. |
+| `screenshots` | `'false'` (default). `'true'` captures the App Store 6.9-inch listing frames instead of the launch check (`/store-screenshots`). Refused together with `crash_test`. |
+| `crash_test` | `false` (default). `true` turns the simulator job into the crash-test probe: an ad-hoc-signed Release build carrying the DSN and `EXPO_PUBLIC_KANGENTIC_CRASHTEST=1`, two Maestro-driven crashes from Settings with a relaunch after each, evidence uploaded as `ios-probe-evidence-*`. Refused together with `submit=testflight` or `screenshots=true`. See the crash reporting section. |
 
 The two build jobs are deliberately independent rather than one matrix. The simulator check needs no
 Apple account, so it is the only iOS signal available when a certificate has expired or a profile has
@@ -1985,7 +1989,9 @@ gh secret set SENTRY_AUTH_TOKEN --repo Kangentic/mobile
 per month, 30-day retention, one seat. Nothing is sampled down, because at this app's volume
 every error is worth having. Volume is controlled instead by not generating noise -
 `ignoreErrors` drops expected transport churn (a phone loses its socket constantly), tracing and
-session tracking are off, and Session Replay is absent. Two server-side backstops are worth
+session tracking are off, Session Replay is absent, and the handled-error door
+(`reportHandledError`) reports at most one event per site, class and verb per minute and ten per
+launch, so a retry loop cannot drain the month either. Two server-side backstops are worth
 setting once in the Sentry UI and are not expressible in code:
 
 1. **Spike Protection**, per project, so one user in a crash loop cannot drain the month.
@@ -2003,9 +2009,13 @@ the repo.
 **Verifying what a delivered crash report actually contains.** `Sentry.init()` options are a
 claim, not an observation - a JS `beforeSend` cannot filter a native crash, so the only way to
 know what sentry-cocoa / sentry-android actually send is to read a delivered event. Set
-`EXPO_PUBLIC_KANGENTIC_CRASHTEST=1` (dispatch `build-android.yml` with `crash_test: true`, never
-in `eas.json`) to reveal a "Crash reporting test" section in Settings with a JS-throw row and a
-`Sentry.nativeCrash()` row, and to turn on the SDK's `debug: true` native logging. That native row
+`EXPO_PUBLIC_KANGENTIC_CRASHTEST=1` (dispatch `build-android.yml` or `build-ios.yml` with
+`crash_test: true`, never in `eas.json`) to reveal a "Crash reporting test" section in Settings
+with a JS-throw row, a `Sentry.nativeCrash()` row and a "Report handled error" row (the
+handled-error door's canary, whose message must NOT arrive), to turn on the SDK's `debug: true`
+native logging, and to report to the `crash-test` Sentry environment rather than `production`
+(a crash-test build carries the same release string as the shipped build cut from that version,
+so the environment is the only separator). That native row
 doubles as the R8 mapping test: `Sentry.nativeCrash()` reaches `RNSentryModuleImpl.crash()`, which
 throws a **Java** `RuntimeException`, so its frames are precisely the ones `mapping.txt`
 deobfuscates. A readable Java frame from a `preview` or `production` build is the only direct proof
@@ -2015,7 +2025,11 @@ does not upload at crash time: sentry-android writes it to its outbox and flushe
 `Sentry.init()`, so relaunch the app and watch `adb logcat -s Sentry` across the relaunch, not
 just the tap. You cannot dispatch a store-track build with this flag on: the `plan` job refuses a
 run that sets both `crash_test` and a `submit_track`, and `submit-play` additionally will not run
-for one. Dispatch them as two separate runs.
+for one. Dispatch them as two separate runs. On iOS the same refusal is the first step of both
+build jobs (against `submit=testflight`, and against `screenshots=true`, which skips the
+simulator the probe drives), and `submit-testflight` will not run for one either. The iOS
+dispatch drives the rows itself, on the CI simulator, and relaunches after each crash; see the
+capture audit block below.
 
 **What that verification actually found**, on a `preview`-profile (arm64-v8a, release-signed,
 non-debuggable) install, cross-checked with `adb logcat`, mitmproxy on the same device, and the

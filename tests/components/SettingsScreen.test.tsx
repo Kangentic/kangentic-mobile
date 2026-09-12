@@ -60,10 +60,12 @@ jest.mock('@/connection/connectionManager', () => ({
 // a timer that would surface as an unhandled error in a later test.
 const mockThrowTestError = jest.fn();
 const mockCrashNatively = jest.fn();
+const mockReportHandledTestError = jest.fn();
 jest.mock('@/observability/crashReporting', () => ({
   ...jest.requireActual('@/observability/crashReporting'),
   throwTestError: () => mockThrowTestError(),
   crashNatively: () => mockCrashNatively(),
+  reportHandledTestError: () => mockReportHandledTestError(),
 }));
 
 function renderSettings(): void {
@@ -340,6 +342,7 @@ describe('SettingsScreen', () => {
     expect(screen.queryByTestId('settings-section-crash-test')).toBeNull();
     expect(screen.queryByTestId('settings-crash-test-js')).toBeNull();
     expect(screen.queryByTestId('settings-crash-test-native')).toBeNull();
+    expect(screen.queryByTestId('settings-crash-test-handled')).toBeNull();
   });
 
   it('reveals the crash-test rows only when EXPO_PUBLIC_KANGENTIC_CRASHTEST is "1"', () => {
@@ -348,12 +351,15 @@ describe('SettingsScreen', () => {
     expect(screen.getByTestId('settings-section-crash-test')).toBeTruthy();
     expect(screen.getByTestId('settings-crash-test-js')).toBeTruthy();
     expect(screen.getByTestId('settings-crash-test-native')).toBeTruthy();
+    expect(screen.getByTestId('settings-crash-test-handled')).toBeTruthy();
   });
 
-  // Visibility alone would still pass with the two handlers swapped, which is
-  // the one mistake that makes the whole affordance lie: the row labelled
-  // "Crash natively" is the only way to exercise the path a JS `beforeSend`
-  // cannot filter, so wiring it to the JS throw would silently verify nothing.
+  // Visibility alone would still pass with the handlers swapped, which is the
+  // one mistake that makes the whole affordance lie: the row labelled "Crash
+  // natively" is the only way to exercise the path a JS `beforeSend` cannot
+  // filter, so wiring it to the JS throw would silently verify nothing, and
+  // the handled-error row is the only way to verify the door's redaction
+  // against a delivered payload.
   it('wires each crash-test row to its own trigger', () => {
     setCrashTestFlag('1');
     renderSettings();
@@ -361,10 +367,17 @@ describe('SettingsScreen', () => {
     fireEvent.press(screen.getByTestId('settings-crash-test-js'));
     expect(mockThrowTestError).toHaveBeenCalledTimes(1);
     expect(mockCrashNatively).not.toHaveBeenCalled();
+    expect(mockReportHandledTestError).not.toHaveBeenCalled();
 
     fireEvent.press(screen.getByTestId('settings-crash-test-native'));
     expect(mockCrashNatively).toHaveBeenCalledTimes(1);
     expect(mockThrowTestError).toHaveBeenCalledTimes(1);
+    expect(mockReportHandledTestError).not.toHaveBeenCalled();
+
+    fireEvent.press(screen.getByTestId('settings-crash-test-handled'));
+    expect(mockReportHandledTestError).toHaveBeenCalledTimes(1);
+    expect(mockThrowTestError).toHaveBeenCalledTimes(1);
+    expect(mockCrashNatively).toHaveBeenCalledTimes(1);
   });
 
   /**

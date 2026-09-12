@@ -1,5 +1,5 @@
 import React from 'react';
-import { act, fireEvent, render, screen } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import { ThemeProvider } from '@/components';
 import { BoardScreen } from '@/screens/BoardScreen';
 import { useActivityStore } from '@/state/activityStore';
@@ -38,6 +38,13 @@ jest.mock('@/connection/actions', () => ({
   deleteTaskFromBoard: (input: unknown) => mockDeleteTaskFromBoard(input),
   archiveTask: (input: unknown) => mockArchiveTask(input),
   refreshSnapshots: jest.fn().mockResolvedValue(undefined),
+}));
+
+// The handled-error door. The arrow forwards its arguments so the failure
+// instance can be asserted, not merely that something was reported.
+const mockReportHandledError = jest.fn();
+jest.mock('@/observability/crashReporting', () => ({
+  reportHandledError: (site: string, error: unknown) => mockReportHandledError(site, error),
 }));
 
 function baseTask(id: string, title: string, swimlaneId: string, position: number, sessionId: string | null) {
@@ -94,6 +101,7 @@ describe('BoardScreen', () => {
     mockPush.mockClear();
     mockMoveTaskOptimistic.mockClear();
     mockCreateTask.mockClear();
+    mockReportHandledError.mockClear();
     // Without this, a prior test's selectProject('project-2') (or an
     // archived-page cursor, or a pending move) survives into the next test's
     // freshly-seeded board, which only overwrites the fields seedBoard names.
@@ -407,5 +415,45 @@ describe('BoardScreen', () => {
     });
 
     expect(mockLoadArchivedTasks).toHaveBeenCalledWith({ projectId: 'project-1' });
+  });
+
+  /**
+   * The Done column's archived read failing used to reach a dev-only console
+   * line and nothing else, so a shipped build's empty Done column was
+   * indistinguishable from "no completed tasks". The handled-error door is
+   * what now counts it (task #67); the board itself must still render.
+   */
+  it('reports an archived read failure through the door and keeps the board', async () => {
+    const failure = Object.assign(new Error('The desktop rejected the read-board request'), { name: 'CapabilityError' });
+    mockLoadArchivedTasks.mockRejectedValueOnce(failure);
+    // jest-expo sets __DEV__, so the dev-only console line fires as well;
+    // silenced so the run output stays readable, and restored either way.
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      render(
+        <ThemeProvider>
+          <BoardScreen />
+        </ThemeProvider>,
+      );
+
+      await waitFor(() => expect(mockReportHandledError).toHaveBeenCalledWith('board-archived-read', failure));
+      expect(screen.getByTestId('board-screen')).toBeTruthy();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('reports nothing through the door when the archived read succeeds', async () => {
+    // The non-vacuity half: the call above must be conditional on the failure.
+    render(
+      <ThemeProvider>
+        <BoardScreen />
+      </ThemeProvider>,
+    );
+    // Lets the resolved archive read settle before asserting the door stayed silent.
+    await act(async () => undefined);
+
+    expect(mockLoadArchivedTasks).toHaveBeenCalled();
+    expect(mockReportHandledError).not.toHaveBeenCalled();
   });
 });

@@ -29,6 +29,13 @@ jest.mock('@/pairing/trustAnchor', () => ({
   TrustAnchorStore: jest.fn().mockImplementation(() => ({ clear: jest.fn() })),
 }));
 
+// The same requireActual imports the handled-error door; stubbed so the real
+// Sentry SDK stays out of this test's module graph. Its own behaviour is
+// covered in usePairedDesktopInfo.test.tsx.
+jest.mock('@/observability/crashReporting', () => ({
+  reportHandledError: jest.fn(),
+}));
+
 const mockUnpairLocally = jest.fn().mockResolvedValue(undefined);
 const mockRevokePushRegistrationForUnpair = jest.fn().mockResolvedValue(undefined);
 // The arrow defers the mock read past import-time hoisting - but it MUST forward

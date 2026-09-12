@@ -96,6 +96,13 @@ check its README or changelog for New Architecture / Expo SDK compatibility stat
     `navigationRef.isReady()` guard added to `PendingNavigationRunner` (it reads false there and
     drops the navigation) and any move of that component above or inside the root `Stack`.
 
+11. **Handled failures report through the door.** Against `crash-reporting-scope.md`: a new
+    `catch` in a screen or component that shows the user a failure (an inline error note, an
+    empty state standing in for a failed read, a fallback to the pairing CTA) calls
+    `reportHandledError` with a `HandledErrorSite` literal as its first statement, and a catch
+    on a pairing screen does not. A `site` derived from a message or a variable, or a screen
+    importing `@sentry/react-native` directly, is a finding.
+
 ## Output Format
 
 ### Findings

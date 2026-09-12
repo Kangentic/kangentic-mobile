@@ -55,6 +55,37 @@ describe('scrubEvent', () => {
     expect(scrubbed.contexts?.os).toEqual({ name: 'Android', version: '15' });
   });
 
+  it('redacts every exception value on an event tagged with a handled-error site', () => {
+    // The second line behind reportHandledError: the door already sends a
+    // synthetic message, and this makes "no message text leaves through the
+    // door" hold even if a future edit captures the original by mistake.
+    // Every value, not just the first - the linked-errors integration appends
+    // one entry per `cause`.
+    const scrubbed = scrubEvent(
+      errorEvent({
+        tags: { site: 'create-task', errorName: 'CapabilityError' },
+        exception: {
+          values: [
+            { type: 'CapabilityError', value: 'the desktop said something verbatim' },
+            { type: 'Error', value: 'and its cause said more' },
+          ],
+        },
+      }),
+    );
+    expect(scrubbed.exception?.values?.map((entry) => entry.value)).toEqual([
+      'handled at create-task',
+      'handled at create-task',
+    ]);
+    expect(scrubbed.exception?.values?.map((entry) => entry.type)).toEqual(['CapabilityError', 'Error']);
+  });
+
+  it('keeps the exception value on a boundary event, which is tagged errorBoundary rather than site', () => {
+    // A render throw's message is app-authored and is what makes a boundary
+    // event diagnosable; the redaction is keyed on `site` and nothing else.
+    const scrubbed = scrubEvent(errorEvent({ tags: { errorBoundary: 'root-layout' } }));
+    expect(scrubbed.exception?.values?.[0]?.value).toBe('undefined is not a function');
+  });
+
   it('leaves contexts absent rather than inventing an empty object', () => {
     const scrubbed = scrubEvent(errorEvent());
     expect('contexts' in scrubbed).toBe(false);

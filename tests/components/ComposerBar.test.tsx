@@ -10,6 +10,14 @@ jest.mock('@/connection/actions', () => ({
   sendUserMessage: jest.fn(),
 }));
 
+// The handled-error door: asserted WITH the rejected instance on failure
+// (which is why the arrow forwards its arguments), and asserted absent on
+// success, so the call cannot become unconditional without a test noticing.
+const mockReportHandledError = jest.fn();
+jest.mock('@/observability/crashReporting', () => ({
+  reportHandledError: (site: string, error: unknown) => mockReportHandledError(site, error),
+}));
+
 // The dictation engine boundary is mocked as a controllable plain object so
 // no expo-speech-recognition native module is ever touched.
 const mockDictationControls = {
@@ -36,6 +44,7 @@ describe('ComposerBar', () => {
   beforeEach(() => {
     mockSendUserMessage.mockReset();
     mockSendUserMessage.mockResolvedValue(undefined);
+    mockReportHandledError.mockClear();
     mockDictationControls.available = true;
     mockDictationControls.listening = false;
     mockDictationControls.start.mockClear();
@@ -50,6 +59,7 @@ describe('ComposerBar', () => {
     fireEvent.press(screen.getByTestId('composer-send'));
     expect(mockSendUserMessage).toHaveBeenCalledWith('sess-1', 'hello agent');
     await waitFor(() => expect(screen.getByTestId('composer-input').props.value).toBe(''));
+    expect(mockReportHandledError).not.toHaveBeenCalled();
   });
 
   it('disables send while the channel is not established', () => {
@@ -64,13 +74,15 @@ describe('ComposerBar', () => {
     expect(screen.getByTestId('composer-send').props.accessibilityState.disabled).toBe(true);
   });
 
-  it('keeps the text and shows an inline error when sending fails', async () => {
-    mockSendUserMessage.mockRejectedValue(new Error('Not connected'));
+  it('keeps the text and shows an inline error when sending fails, and reports it through the door', async () => {
+    const failure = new Error('Not connected');
+    mockSendUserMessage.mockRejectedValue(failure);
     renderComposer();
     fireEvent.changeText(screen.getByTestId('composer-input'), 'hello agent');
     fireEvent.press(screen.getByTestId('composer-send'));
     expect(await screen.findByText('Not connected')).toBeTruthy();
     expect(screen.getByTestId('composer-input').props.value).toBe('hello agent');
+    expect(mockReportHandledError).toHaveBeenCalledWith('composer-send', failure);
   });
 
   it('hides the mic when dictation mode is off', () => {

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { bytesToHex } from '@kangentic/protocol';
+import { reportHandledError } from '@/observability/crashReporting';
 import { DeviceIdentityManager } from '@/pairing/deviceIdentity';
 import { TrustAnchorStore } from '@/pairing/trustAnchor';
 
@@ -48,7 +49,11 @@ export function usePairedDesktopInfo(): PairedDesktopInfoState {
             phonePublicKeyHex: bytesToHex(identity.publicKey),
           },
         });
-      } catch {
+      } catch (error: unknown) {
+        // A Keychain read failing renders as "not paired", which is the
+        // recoverable answer for the user and a lie for the developer: the
+        // door is what tells the two apart. The message never leaves.
+        reportHandledError('devices-paired-info', error);
         if (!cancelled) setState({ status: 'unpaired' });
       }
     })();

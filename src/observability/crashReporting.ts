@@ -1,4 +1,5 @@
 import * as Sentry from '@sentry/react-native';
+import { isCapabilityVerb, type CapabilityVerb } from '@kangentic/protocol';
 import { allowlistBreadcrumb, scrubEvent } from './scrubEvent';
 
 /**
@@ -123,6 +124,156 @@ export function crashNatively(): void {
 export function reportCaughtError(error: Error, boundary: string): void {
   if (!initialized) return;
   Sentry.captureException(error, { tags: { errorBoundary: boundary } });
+}
+
+/**
+ * Where a handled failure was caught. A closed union rather than `string` so
+ * the `site` tag is a compile-time literal: a caller cannot pass
+ * `error.message` or anything computed, which is what makes the rule's "tags
+ * are static literals" bullet mechanical instead of reviewed. Adding a member
+ * means adding the literal here and asserting the call in that surface's
+ * component test, on failure and not on success.
+ */
+export type HandledErrorSite =
+  | 'board-archived-read'
+  | 'composer-send'
+  | 'connection-open'
+  | 'crash-test'
+  | 'create-task'
+  | 'devices-paired-info';
+
+/**
+ * Error classes that are a normal condition on a phone, never a defect: no
+ * channel, or a socket that dropped mid-request. Matched by NAME, not
+ * `instanceof`: importing NotConnectedError from src/connection is an import
+ * cycle (src/connection imports this module), and importing from src/channel
+ * would pull the protocol stack into index.js's first import. Each entry is
+ * the literal its constructor assigns to `this.name`.
+ */
+const HANDLED_ERROR_EXCLUDED_NAMES: ReadonlySet<string> = new Set(['NotConnectedError', 'ChannelDisconnectedError']);
+
+/**
+ * A retry loop must not burn the free tier: at most one report per site and
+ * class per minute, and ten per launch. Server-side Spike Protection is the
+ * backstop for a fleet-wide bug (docs/developer-guide.md). Counts read out
+ * of Sentry for a handled site are therefore lower bounds.
+ */
+const HANDLED_REPORT_COOLDOWN_MS = 60_000;
+const HANDLED_REPORTS_PER_KEY_PER_LAUNCH = 10;
+
+/** An error name is an identifier, or it is not trusted as a tag value. */
+const SAFE_ERROR_NAME_PATTERN = /^[A-Za-z_$][\w$]{0,63}$/;
+const FRAME_LINE_PATTERN = /^\s+at\s/;
+
+const handledReportLastAtMs = new Map<string, number>();
+const handledReportCounts = new Map<string, number>();
+
+interface HandledErrorShape {
+  errorName: string;
+  verb: CapabilityVerb | null;
+  message: string;
+  frames: string | null;
+}
+
+/**
+ * The `    at ...` lines of a stack and nothing else. Hermes and V8 both
+ * format `stack` as `${name}: ${message}` followed by one frame line per
+ * frame, so the message is inside the string even though Sentry's parser
+ * drops non-frame lines. Keeping only frame lines, and dropping any line the
+ * message itself contains, makes "the message never enters the SDK" a
+ * property of the string handed over rather than of the parser: a message
+ * that carries a newline and a fake `at` line cannot become a frame either.
+ */
+function frameLinesOnly(stack: string | undefined, message: string): string | null {
+  if (stack === undefined) return null;
+  const messageLines = new Set(message.split('\n'));
+  const frames = stack.split('\n').filter((line) => FRAME_LINE_PATTERN.test(line) && !messageLines.has(line));
+  return frames.length === 0 ? null : frames.join('\n');
+}
+
+function describeHandledError(error: unknown): HandledErrorShape {
+  if (!(error instanceof Error)) return { errorName: 'NonError', verb: null, message: '', frames: null };
+  const errorName = SAFE_ERROR_NAME_PATTERN.test(error.name) ? error.name : 'Error';
+  // Duck-typed rather than `instanceof CapabilityError`: importing src/channel
+  // here would pull the protocol stack into index.js's first import, and the
+  // verb is validated against the protocol's closed list either way.
+  const verbCandidate: unknown = (error as Error & { verb?: unknown }).verb;
+  const verb = typeof verbCandidate === 'string' && isCapabilityVerb(verbCandidate) ? verbCandidate : null;
+  return { errorName, verb, message: error.message, frames: frameLinesOnly(error.stack, error.message) };
+}
+
+/**
+ * Reports a failure the app CAUGHT and then showed the user, or turned into a
+ * wrong-but-plausible state. The call-site policy (where to call this, and
+ * where never to) lives in .claude/rules/crash-reporting-scope.md.
+ *
+ * What leaves the device is a synthetic Error - message `handled at <site>`,
+ * the original's class name, the original's stack FRAMES - with the tags
+ * `site`, `errorName`, and `verb` (only when the field is one of the
+ * protocol's ten literals), fingerprinted on those three so grouping is by
+ * site and kind, never by message. The original object, its message and its
+ * `cause` chain never reach the SDK: a CapabilityError's peer-supplied text,
+ * a Keychain error's detail, or a relay-transport string cannot ride out
+ * through here. scrubEvent re-asserts that on any event tagged `site`, as a
+ * second line of defence.
+ *
+ * `ignoreErrors` matches the message the SDK is given, which is the synthetic
+ * one, so EXPECTED_TRANSPORT_NOISE is applied here against the ORIGINAL
+ * message before it is discarded. A no-op when `Sentry.init()` never ran
+ * (every build made from source), and it never throws into the path that was
+ * already failing.
+ */
+export function reportHandledError(site: HandledErrorSite, error: unknown): void {
+  if (!initialized) return;
+  const described = describeHandledError(error);
+  if (HANDLED_ERROR_EXCLUDED_NAMES.has(described.errorName)) return;
+  if (EXPECTED_TRANSPORT_NOISE.some((pattern) => pattern.test(described.message))) return;
+
+  const rateKey = `${site}|${described.errorName}|${described.verb ?? ''}`;
+  const now = Date.now();
+  const lastReportedAt = handledReportLastAtMs.get(rateKey);
+  if (lastReportedAt !== undefined && now - lastReportedAt < HANDLED_REPORT_COOLDOWN_MS) return;
+  const reportCount = handledReportCounts.get(rateKey) ?? 0;
+  if (reportCount >= HANDLED_REPORTS_PER_KEY_PER_LAUNCH) return;
+  handledReportLastAtMs.set(rateKey, now);
+  handledReportCounts.set(rateKey, reportCount + 1);
+
+  const reported = new Error(`handled at ${site}`);
+  reported.name = described.errorName;
+  // An own data property, so it shadows Hermes' Error.prototype.stack accessor
+  // as well as V8's own-property form. Left as the synthetic's own stack (the
+  // catch site) when the original had no frames, e.g. a thrown string.
+  if (described.frames !== null) {
+    Object.defineProperty(reported, 'stack', { value: described.frames, writable: true, configurable: true });
+  }
+  try {
+    Sentry.captureException(reported, {
+      tags: {
+        site,
+        errorName: described.errorName,
+        ...(described.verb !== null ? { verb: described.verb } : {}),
+      },
+      fingerprint: ['handled', site, described.errorName, described.verb ?? ''],
+    });
+  } catch {
+    // Reporting must never cascade into the path that was already failing.
+  }
+}
+
+/**
+ * The Settings crash-test row for the door. The canary's message is text
+ * that must NOT arrive in Sentry: reading the delivered event back is the
+ * only way to verify the redaction against a real payload, which is this
+ * repo's standard for a privacy claim (see crashTestEnabled above). Shaped
+ * like the peer-supplied case, a CapabilityError carrying a verb, so the
+ * delivered tags prove the duck-typed verb path too.
+ */
+export function reportHandledTestError(): void {
+  const canary = Object.assign(new Error('crash-test: THIS TEXT MUST NOT ARRIVE IN SENTRY'), {
+    name: 'CapabilityError',
+    verb: 'read-board',
+  });
+  reportHandledError('crash-test', canary);
 }
 
 /**

@@ -41,6 +41,18 @@ vi.mock('@/notifications/pushKeys', () => ({
   clearPushRegistration: pushKeysMocks.clearPushRegistration,
 }));
 
+// The handled-error door. Mocked for two reasons: openConnection's catch is
+// asserted to call it (with the failure, not merely at all), and the real
+// module imports @sentry/react-native, whose wrapper reads
+// NativeModules.RNSentry at import time - absent from the minimal
+// react-native stub below, so the real door cannot even load here.
+const crashReportingMocks = vi.hoisted(() => ({
+  reportHandledError: vi.fn<(site: string, error: unknown) => void>(),
+}));
+vi.mock('@/observability/crashReporting', () => ({
+  reportHandledError: crashReportingMocks.reportHandledError,
+}));
+
 // connectionManager.ts imports AppState/Platform statically; neither
 // revokePushRegistrationForUnpair nor resyncPushRegistrationCategories
 // touches AppState, so a minimal stub is enough to let the module load.
@@ -165,26 +177,33 @@ describe('openConnection failure leaves a route to pairing', () => {
     stopConnectionLifecycle();
     useChannelStore.getState().setPairedState('unknown');
     secureStoreMocks.getItemAsync.mockReset();
+    crashReportingMocks.reportHandledError.mockClear();
   });
 
-  it('falls back to unpaired when the trust-anchor read rejects', async () => {
+  it('falls back to unpaired when the trust-anchor read rejects, and reports it through the door', async () => {
     // The regression. Without the catch, pairedState stays 'unknown' and the
-    // screen shows "Connecting..." with no pair CTA, permanently.
-    secureStoreMocks.getItemAsync.mockRejectedValue(new Error('keychain unavailable'));
+    // screen shows "Connecting..." with no pair CTA, permanently. The
+    // fallback is right for the user and silent for the developer, which is
+    // what the handled-error door exists for (task #67).
+    const failure = new Error('keychain unavailable');
+    secureStoreMocks.getItemAsync.mockRejectedValue(failure);
 
     startConnectionLifecycle();
 
     await vi.waitFor(() => expect(useChannelStore.getState().pairedState).toBe('unpaired'));
+    await vi.waitFor(() => expect(crashReportingMocks.reportHandledError).toHaveBeenCalledWith('connection-open', failure));
   });
 
   it('still reports unpaired normally when there is simply no anchor', async () => {
     // The non-vacuity half: the fallback must not become the only reason this ever
-    // reads 'unpaired', or the test above would pass against a broken app.
+    // reads 'unpaired', or the test above would pass against a broken app. And an
+    // honest "no anchor" is not a failure, so the door stays silent.
     secureStoreMocks.getItemAsync.mockResolvedValue(null);
 
     startConnectionLifecycle();
 
     await vi.waitFor(() => expect(useChannelStore.getState().pairedState).toBe('unpaired'));
+    expect(crashReportingMocks.reportHandledError).not.toHaveBeenCalled();
   });
 
   it('does not overwrite an already-resolved paired state', async () => {

@@ -2,6 +2,7 @@ import React, { useCallback, useRef, useState } from 'react';
 import { StyleSheet, View, type TextInput } from 'react-native';
 import { IconButton, Row, Text, TextField, useTheme } from '@/components';
 import { sendUserMessage } from '@/connection/actions';
+import { reportHandledError } from '@/observability/crashReporting';
 import { useChannelStore } from '@/state/channelStore';
 import { useSettingsStore } from '@/state/settingsStore';
 import { useDictation } from '@/voice/useDictation';
@@ -57,6 +58,7 @@ export function ComposerBar({ sessionId }: ComposerBarProps): React.JSX.Element 
           setText('');
         })
         .catch((error: unknown) => {
+          reportHandledError('composer-send', error);
           // Keep the text so the user can retry.
           setErrorNote(error instanceof Error ? error.message : 'Message failed to send');
         })

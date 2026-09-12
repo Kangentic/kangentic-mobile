@@ -10,6 +10,7 @@ import { TrustAnchorStore } from '@/pairing/trustAnchor';
 import { DEMO_DESKTOP_STATIC, isDemoAnchor } from '@/demo/demoIdentity';
 import { setActivePushIdentityPublicKey } from '@/notifications/pushIdentity';
 import { notificationPermissionGranted, notificationPermissionStatus } from '@/notifications/permissionCache';
+import { reportHandledError } from '@/observability/crashReporting';
 import { useChannelStore } from '@/state/channelStore';
 import { useSettingsStore } from '@/state/settingsStore';
 import { bindFeedToStores, createSnapshotSinks } from './storeFeed';
@@ -228,6 +229,11 @@ async function openConnection(): Promise<void> {
   try {
     await openConnectionOrThrow();
   } catch (error: unknown) {
+    // Reported in every branch, not only the stranded one: a failure after
+    // 'paired' is just as real, and the error originates in src/pairing (a
+    // Keychain read) but is CAUGHT here, which is what the door's site tag
+    // records. The message never leaves; see reportHandledError.
+    reportHandledError('connection-open', error);
     if (useChannelStore.getState().pairedState === 'unknown') {
       useChannelStore.getState().setPairedState('unpaired');
     }

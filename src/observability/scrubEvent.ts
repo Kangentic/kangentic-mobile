@@ -48,8 +48,37 @@ export function allowlistBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb | null {
  * the point). EXPECTED_TRANSPORT_NOISE in crashReporting.ts exists exactly
  * because channel errors do arrive today. The rule file names this gap.
  */
+/**
+ * The second line behind reportHandledError (crashReporting.ts). An event
+ * tagged `site` came through the handled-error door, whose contract is that
+ * no message text leaves; the door already sends a synthetic message, and
+ * this makes the contract hold even if a future edit captures the original
+ * by mistake. Every value is rewritten, not just the first: the
+ * linked-errors integration appends one entry per `cause`. Keyed on `site`
+ * and nothing else - the boundary path tags `errorBoundary` and keeps its
+ * message on purpose, because a render throw's message is app-authored.
+ */
+function redactHandledExceptionValues(event: ErrorEvent): ErrorEvent {
+  const site = event.tags?.site;
+  if (typeof site !== 'string' || event.exception?.values === undefined) return event;
+  return {
+    ...event,
+    exception: {
+      ...event.exception,
+      values: event.exception.values.map((entry) => ({ ...entry, value: `handled at ${site}` })),
+    },
+  };
+}
+
 export function scrubEvent(event: ErrorEvent): ErrorEvent {
-  const { user: _user, request: _request, extra: _extra, server_name: _serverName, contexts, ...rest } = event;
+  const {
+    user: _user,
+    request: _request,
+    extra: _extra,
+    server_name: _serverName,
+    contexts,
+    ...rest
+  } = redactHandledExceptionValues(event);
   if (contexts === undefined) return rest;
   const { response: _response, ...scrubbedContexts } = contexts;
   // Omit `contexts` rather than sending an empty object, including when

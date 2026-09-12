@@ -127,14 +127,19 @@ src/
                   #   channel-fed, in-memory) + the non-Zustand terminalFeed PTY ring buffers
   voice/          # Dictation hook over the OS speech engines (expo-speech-recognition)
   observability/  # Sentry crash reporting - the only module allowed to import the SDK, plus the
-                  #   pure event/breadcrumb scrubber (see crash-reporting-scope.md)
+                  #   pure event/breadcrumb scrubber (see crash-reporting-scope.md). Two capture
+                  #   calls live behind it: reportCaughtError (the root error boundary) and
+                  #   reportHandledError (the handled-error door for caught failures, which
+                  #   never forwards message text; sites are a closed union)
   lib/            # Shared pure utilities (crypto polyfills, haptics)
 tests/
   unit/           # vitest (pure TS, no RN runtime) - includes the loopback-transport + stub-desktop-peer helpers
   components/     # Jest + React Native Testing Library
   helpers/        # Shared cross-tier test utilities (async waitUntil / flushMicrotasks)
   web/            # Playwright via react-native-web (later)
-.maestro/         # Maestro E2E flows (smoke unpaired; paired/ flows need scripts/stubDesktopPeer.mjs)
+.maestro/         # Maestro E2E flows (smoke unpaired; paired/ flows need scripts/stubDesktopPeer.mjs;
+                  #   probes/ are NOT tests: the crash-test flows that
+                  #   `build-ios.yml -f crash_test=true` drives on the CI simulator)
 scripts/          # bash-guard.js, dev.mjs, stubDesktopPeer.mjs, buildXtermHtml.mjs
                   #   (assembles xterm.html from the page fragments in xterm-page/),
                   #   xterm-page/ (the WebView glue as plain browser .js modules,

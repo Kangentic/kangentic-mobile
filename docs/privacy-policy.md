@@ -29,7 +29,9 @@ it.
 A crash report contains the technical details of the failure, and nothing about what you were
 doing in the app:
 
-- the error type, message, and the stack trace showing where in the app's code it happened
+- the error type, message, and the stack trace showing where in the app's code it happened (for
+  an error the app caught and handled itself, the message is replaced by a fixed label naming the
+  part of the app that caught it)
 - the app version, plus the standard device diagnostics that accompany any crash report: your
   device model, its operating system version, and the ordinary technical state alongside them
   (things like battery level, free memory and storage, screen size and orientation, and device

@@ -102,7 +102,7 @@ export class ChannelController {
 
 export { RelayTransport, type RelayTransportOptions } from './relayTransport';
 export { SessionManager, type SessionManagerOptions } from './sessionManager';
-export { CapabilityClient } from './capabilityClient';
+export { CapabilityClient, CapabilityTimeoutError, ChannelDisconnectedError } from './capabilityClient';
 export { FeedRouter } from './feedRouter';
 export { VerbClient, CapabilityError, type ReadDiffFileListInput, type ReadDiffFileContentInput } from './verbClient';
 export { SubscriptionManager, type SubscriptionManagerOptions, type SubscriptionSnapshotSinks } from './subscriptionManager';
