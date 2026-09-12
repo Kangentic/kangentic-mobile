@@ -20,11 +20,15 @@ appId: com.kangentic.mobile
     visible:
       id: "settings-screen"
     timeout: 20000
+# Centred, not merely reached: see crash-test-js.yaml for the run where a row
+# counted as visible while clipped below its scroll container, and the tap
+# landed on nothing.
 - scrollUntilVisible:
     element:
       id: "settings-crash-test-native"
     direction: DOWN
-    visibilityPercentage: 50
+    visibilityPercentage: 100
+    centerElement: true
     timeout: 30000
 - tapOn:
     id: "settings-crash-test-native"

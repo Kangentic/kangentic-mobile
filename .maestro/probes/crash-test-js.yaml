@@ -34,25 +34,37 @@ appId: com.kangentic.mobile
     visible:
       id: "settings-screen"
     timeout: 20000
-# The handled-error canary first, while the app is still alive. It reports a
-# CapabilityError whose message must NOT arrive in Sentry (the door redacts
-# it), and it does not crash, so it costs nothing to send before the throw.
-# Guarded rather than asserted so a build cut before the row existed still
-# runs the crash below.
-- runFlow:
-    when:
-      visible:
-        id: "settings-crash-test-handled"
-    commands:
-      - tapOn:
-          id: "settings-crash-test-handled"
-# The crash-test section sits below Feedback and Dictation, so it may be
-# under the fold on the picked simulator.
+# The crash-test section sits below Feedback and Dictation, under the fold.
+#
+# CENTRE THE ROW, do not merely reach it. Run 34671071483 scrolled until the
+# JS row counted as "visible" and tapped it, and nothing happened: the row's
+# bounds were [841,885] while its scroll container ended at 840 (the home
+# indicator inset), so three quarters of it was on the physical screen and
+# all of it was clipped by the ScrollView. The tap landed outside the
+# container. centerElement keeps scrolling until the row sits mid-screen,
+# which is the only position that is both on screen and inside the
+# container. The store-capture flow learned the same lesson.
+#
+# The handled-error canary goes first, while the app is still alive. It
+# reports a CapabilityError whose message must NOT arrive in Sentry (the door
+# redacts it), and it does not crash, so it costs nothing to send before the
+# throw. It is the last row of the section, so centring it centres the whole
+# section.
+- scrollUntilVisible:
+    element:
+      id: "settings-crash-test-handled"
+    direction: DOWN
+    visibilityPercentage: 100
+    centerElement: true
+    timeout: 30000
+- tapOn:
+    id: "settings-crash-test-handled"
 - scrollUntilVisible:
     element:
       id: "settings-crash-test-js"
     direction: DOWN
-    visibilityPercentage: 50
+    visibilityPercentage: 100
+    centerElement: true
     timeout: 30000
 - tapOn:
     id: "settings-crash-test-js"
