@@ -911,10 +911,16 @@ jobs:
               echo "$signed"
               return
             fi
-            # otool prints a header line, a "Contents of" line, then one line
-            # per row of `<address><tab><hex bytes>`; drop the address column
-            # and decode the rest as plain hex.
-            otool -s __TEXT __entitlements "$bundle/$executable" 2>/dev/null | tail -n +3 | awk '{ $1 = ""; print }' | xxd -r -p || true
+            # Read the section's raw bytes by offset and size. NOT `otool -s`:
+            # it prints the section as 32-bit words in host byte order, so a
+            # plain hex decode reverses every four bytes ("mx?<" for "<?xm",
+            # run 34708736075), which is exactly wrong for a text plist.
+            local executable_path="$bundle/$executable" offset size
+            offset="$(otool -l "$executable_path" 2>/dev/null | awk '/sectname __entitlements/ { found = 1 } found && $1 == "offset" { print $2; exit }')"
+            size="$(otool -l "$executable_path" 2>/dev/null | awk '/sectname __entitlements/ { found = 1 } found && $1 == "size" { print $2; exit }')"
+            if [ -n "$offset" ] && [ -n "$size" ]; then
+              dd if="$executable_path" bs=1 skip="$offset" count="$(( size ))" 2>/dev/null || true
+            fi
           }
           check_bundle() {
             local bundle="$1" executable="$2" entitlements
