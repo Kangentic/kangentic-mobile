@@ -141,10 +141,15 @@ export function prChipPresentation(
 }
 
 /**
- * The PR's state as one always-present word, for surfaces with room to say it
- * even where the chip shows no label: the long-press menu's caption and the
- * chip's accessibility label. Shares `prChipPresentation`'s readiness mapping
- * so the two can never describe the same PR differently.
+ * The PR's state as one always-present word, for a surface with room to say it
+ * even where the chip shows no label. Its one caller today is the long-press
+ * menu's caption (`TaskActionsScreen`).
+ *
+ * Reads `READINESS_PRESENTATION` rather than keeping its own mapping, which is
+ * what stops the menu and the card describing the same PR differently.
+ * `prChipAccessibilityLabel` reads that same table directly rather than going
+ * through here, so the three stay consistent by sharing a source, not by
+ * calling each other.
  */
 export function prStateSummary(prState: string | null, prMergeReadiness: string | null): string {
   if (prState === 'open') {

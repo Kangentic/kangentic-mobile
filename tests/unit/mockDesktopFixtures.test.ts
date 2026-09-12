@@ -24,7 +24,9 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
+import type { BoardTaskWire } from '@kangentic/protocol';
 
+import { PR_READINESS_VERDICTS } from '@/components/board/prChipPresentation';
 import {
   MOCK_CONTEXT_WINDOW_FOR_TEST,
   MOCK_CODEX_SESSION_DIFF,
@@ -245,6 +247,75 @@ describe('the mock fixtures stay inside the customer fiction', () => {
       .filter((entry) => wordPattern.test(entry.text))
       .map((entry) => `${entry.label}: ${entry.text}`);
     expect(offenders).toEqual([]);
+  });
+});
+
+/**
+ * The mock board's PR-bearing cards are curated, per the comments beside them
+ * in `initialTasks()`, to demonstrate the full set of readiness outcomes a
+ * reviewer or a store screenshot can land on: every recognised verdict, a
+ * value this client does not recognise (degrading to plain open), and a
+ * stale verdict surviving on a PR that is no longer open. Nothing else in
+ * the repo renders these fixtures through the board, so a retune that drops
+ * one of those cases - the same way `pr_merge_readiness` itself could be
+ * dropped in a merge - is invisible to every other check.
+ *
+ * Deliberately NOT pinned to which task id carries which verdict: these
+ * cards get retuned for design review and the store shelves, so a copy of
+ * today's assignment would just be a change-detector. What has to survive a
+ * retune is the set of scenarios, so that is what is asserted, mirroring
+ * `prChipPresentation.test.ts`'s own `PR_READINESS_VERDICTS` iteration - a
+ * verdict added to that table fails HERE until the mock board actually shows
+ * it, rather than waiting on a hand-updated list that would not know to
+ * extend itself.
+ */
+describe('the mock board demonstrates every PR readiness verdict', () => {
+  function prBearingTasks(): BoardTaskWire[] {
+    return [...initialTasks(), ...initialTasks2()].filter((task) => task.pr_state !== null);
+  }
+
+  it('carries enough PR-bearing fixtures to demonstrate every scenario below', () => {
+    // Not a non-vacuity guard - the `.some(...)` assertions below are already
+    // false, not vacuously true, against an empty list. This is a real lower
+    // bound: every recognised verdict needs its own open-PR card, plus one
+    // unrecognised value and one stale verdict on a non-open PR, so the board
+    // cannot satisfy every case below with fewer cards than that. Failing
+    // here gives one readable message instead of the same shortfall reported
+    // once per missing verdict.
+    expect(prBearingTasks().length).toBeGreaterThanOrEqual(PR_READINESS_VERDICTS.length + 2);
+  });
+
+  it.each(PR_READINESS_VERDICTS)(
+    'demonstrates the %s verdict on an open PR somewhere on the mock board',
+    (verdict) => {
+      const demonstrated = prBearingTasks().some(
+        (task) => task.pr_state === 'open' && task.pr_merge_readiness === verdict,
+      );
+      expect(demonstrated).toBe(true);
+    },
+  );
+
+  it('demonstrates a value this client does not recognise, so the bare-glyph degrade path is actually on screen', () => {
+    const demonstrated = prBearingTasks().some(
+      (task) =>
+        task.pr_state === 'open' &&
+        task.pr_merge_readiness !== null &&
+        !PR_READINESS_VERDICTS.includes(task.pr_merge_readiness),
+    );
+    expect(demonstrated).toBe(true);
+  });
+
+  it('demonstrates a stale verdict surviving on a non-open PR, so the open-only guard has something to prove', () => {
+    // If the merged card's stale `ready` ever gets "tidied up" to null, the
+    // board silently stops demonstrating that readiness is ignored outside
+    // the open branch, and nothing else here would notice.
+    const demonstrated = prBearingTasks().some(
+      (task) =>
+        task.pr_state !== 'open' &&
+        task.pr_merge_readiness !== null &&
+        PR_READINESS_VERDICTS.includes(task.pr_merge_readiness),
+    );
+    expect(demonstrated).toBe(true);
   });
 });
 
