@@ -804,6 +804,10 @@ describe('build-ios crash-test probe', () => {
     const flowsStep = requireStep('simulator', 'Run the crash-test flows');
     expect(flowsStep.if).toContain("env.CRASH_TEST == 'true'");
     expect(flowsStep.env?.MAESTRO_DEVICE).toBe('${{ steps.smoke.outputs.device-id }}');
+    // The verdict that a crash happened is the process table, not a crash
+    // report: run 34672597979 crashed the app with no .ips written 25 s later.
+    expect(flowsStep.run).toContain('launchctl list');
+    expect(flowsStep.run).not.toMatch(/if \[ -z "\$\(crash_reports\)" \]/);
     // A renamed flow otherwise fails deep into a run, after the build.
     for (const flowPath of ['.maestro/probes/crash-test-js.yaml', '.maestro/probes/crash-test-native.yaml']) {
       expect(flowsStep.run).toContain(flowPath);

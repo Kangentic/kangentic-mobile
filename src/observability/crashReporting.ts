@@ -26,10 +26,15 @@ import { allowlistBreadcrumb, scrubEvent } from './scrubEvent';
  * payload, not inferred: `app.lifecycle` (foreground/background),
  * `device.event` (battery level, charging, screen on/off), and
  * `network.event` (action, network type, VPN active, signal strength, and
- * up/down bandwidth). sentry-cocoa was not itself tested, so treat iOS
- * parity as an assumption. They carry no session content, but do not read
- * the block below as covering them: closing that needs native config
- * through a config plugin. A crash the OS catches also carries a
+ * up/down bandwidth). sentry-cocoa does the same: `started` and
+ * `ui.lifecycle` were observed on the first iOS event the project received
+ * (2026-09-12), and on a JS-CAPTURED event at that, because the SDK's
+ * device-context integration merges the native scope's breadcrumbs into
+ * every JS event before `beforeSend` - which is why scrubEvent applies the
+ * allowlist to `event.breadcrumbs` as well. They carry no session content,
+ * but do not read the block below as covering a NATIVE crash's breadcrumbs:
+ * closing that needs native config through a config plugin. A crash the OS
+ * catches also carries a
  * per-install identifier (`contexts.device.id`, promoted into `user.id`)
  * that `sendDefaultPii: false` does not stop and `scrubEvent` never sees;
  * it is disclosed in docs/privacy-policy.md rather than suppressed.

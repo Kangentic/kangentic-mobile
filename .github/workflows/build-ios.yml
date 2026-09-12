@@ -451,40 +451,6 @@ jobs:
           fi
           echo "app-path=$app_path" >> "$GITHUB_OUTPUT"
 
-      # THE NSE PROBE'S MOST UNCERTAIN ASSUMPTION, checked before a simulator
-      # minute is spent on it. The extension reads the push key through its
-      # `keychain-access-groups` entitlement (SharedKeychain.swift sets no
-      # group on the query), and the app writes with the group the bundle
-      # inlined. Both entitlements files spell it `$(AppIdentifierPrefix)` +
-      # `com.kangentic.mobile.shared`; on an ad-hoc simulator build with no
-      # team that prefix should expand to nothing, but nothing has verified it.
-      # So: read the entitlements out of BOTH signed bundles, print them (safe:
-      # this job installs no signing material, so no team id can appear), and
-      # fail naming the observed value when it is not the literal the app was
-      # built with. Attempt two then corrects the literal from evidence.
-      - name: Verify the shared Keychain group the simulator bundles carry
-        if: env.NSE_PROBE == 'true'
-        env:
-          APP_PATH: ${{ steps.verify.outputs.app-path }}
-        run: |
-          set -euo pipefail
-          expected_group="$EXPO_PUBLIC_KANGENTIC_IOS_KEYCHAIN_GROUP"
-          for bundle in "$APP_PATH" "$APP_PATH/PlugIns/KangenticNSE.appex"; do
-            echo "::group::Entitlements of $(basename "$bundle")"
-            entitlements="$(codesign -d --entitlements - --xml "$bundle" 2>/dev/null || codesign -d --entitlements :- "$bundle" 2>/dev/null || true)"
-            echo "$entitlements"
-            echo "::endgroup::"
-            if [ -z "$entitlements" ]; then
-              echo "::error::$(basename "$bundle") carries no readable entitlements. The ad-hoc signing did not embed any, so the app and the extension cannot share a Keychain group."
-              exit 1
-            fi
-            if ! echo "$entitlements" | grep -q "<string>$expected_group</string>"; then
-              echo "::error::$(basename "$bundle") does not carry the Keychain group the app was built to write to ($expected_group). Read the group it DOES carry above and correct the literal in 'Export the NSE probe env'."
-              exit 1
-            fi
-          done
-          echo "Both bundles carry keychain-access-group $expected_group."
-
       # Compiling is not running. Until this step existed the iOS app had never
       # been launched anywhere, so a missing Info.plist key, a native module that
       # throws in its constructor, or a JS bundle that dies on first render would
@@ -815,6 +781,28 @@ jobs:
             find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name '*.ips' -newer "$EVIDENCE/run-start.marker" -print0 2>/dev/null \
               | xargs -0 grep -l 'com.kangentic.mobile' 2>/dev/null || true
           }
+          app_is_running() {
+            # Capture THEN match. Piping launchctl straight into `grep -q`
+            # races SIGPIPE under pipefail; smoke-ios-simulator.sh records the
+            # run that taught this.
+            local process_list
+            process_list="$(xcrun simctl spawn "$MAESTRO_DEVICE" launchctl list)"
+            grep -q "com.kangentic.mobile" <<< "$process_list"
+          }
+          # THE PROCESS TABLE IS THE VERDICT, NOT THE CRASH REPORT. Run
+          # 34672597979 tapped the JS row, the app died (a screenshot of the
+          # bare home screen, and the handled canary sent seconds earlier
+          # arrived in Sentry), and ~/Library/Logs/DiagnosticReports still
+          # held no .ips 25 s later. Whatever this runner image does with
+          # simulator crash reports, it is not prompt, so the reports are
+          # collected afterwards as a bonus and the gate is "the app is gone".
+          assert_app_died() {
+            if app_is_running; then
+              echo "::error::com.kangentic.mobile is still running after $1, so the tap did not crash it. Read the flow's debug output in the ios-probe-evidence artifact."
+              exit 1
+            fi
+            echo "com.kangentic.mobile is no longer running after $1: the crash happened."
+          }
           relaunch_and_flush() {
             xcrun simctl launch "$MAESTRO_DEVICE" com.kangentic.mobile
             sleep 25
@@ -823,25 +811,25 @@ jobs:
             maestro --device "$MAESTRO_DEVICE" test "$1" \
               --format JUNIT --output "$EVIDENCE/$2.xml" \
               --debug-output "$EVIDENCE/$2-debug" --flatten-debug-output \
-              || echo "::warning::$1 did not exit cleanly; deciding on the crash report instead."
+              || echo "::warning::$1 did not exit cleanly; deciding on the process table instead."
             sleep 5
           }
 
           maestro --version
           run_flow .maestro/probes/crash-test-js.yaml js
-          if [ -z "$(crash_reports)" ]; then
-            echo "::error::No crash report for com.kangentic.mobile after the JS throw. Either the tap never landed (read js-debug in the ios-probe-evidence artifact) or this bundle does not carry EXPO_PUBLIC_KANGENTIC_CRASHTEST=1."
-            exit 1
-          fi
+          assert_app_died "the JS throw"
           relaunch_and_flush
 
           run_flow .maestro/probes/crash-test-native.yaml native
-          report_count="$(crash_reports | wc -l | tr -d ' ')"
-          if [ "$report_count" -lt 2 ]; then
-            echo "::error::Expected two crash reports (the JS throw, then the native crash) and found $report_count."
-            exit 1
-          fi
+          assert_app_died "the native crash"
           relaunch_and_flush
+
+          report_count="$(crash_reports | wc -l | tr -d ' ')"
+          if [ "$report_count" -eq 0 ]; then
+            echo "::warning::No .ips crash report appeared in ~/Library/Logs/DiagnosticReports. The crashes happened (the process was gone both times); this runner image does not write simulator crash reports there promptly, if at all."
+          else
+            echo "Crash reports on disk: $report_count."
+          fi
           echo "Two deliberate crashes recorded and the app relaunched after each. Sentry should now hold two iOS events under environment crash-test."
 
       # Always collected, even when the step above failed: the crash reports,
@@ -863,18 +851,57 @@ jobs:
           fi
           echo "Crash reports collected: $(find "$EVIDENCE" -maxdepth 1 -name '*.ips' | wc -l | tr -d ' ')"
           # sentry-cocoa logs through NSLog under the APP's process when
-          # `debug: true` (which the crash-test flag turns on). Matched on the
-          # process IMAGE PATH rather than the process name: run 34671071483's
-          # predicate on `process == "<scheme>"` captured other daemons'
-          # lines and none of the app's, so the app's image path inside the
-          # .app bundle is the discriminator, and it also covers the extension
-          # inside PlugIns/. Evidence, not assertion: the exact strings are
+          # `debug: true` (which the crash-test flag turns on), with a
+          # `[Sentry]` prefix. Read from the HOST's unified log, where simulator
+          # processes log as ordinary host processes: two runs of
+          # `simctl spawn <sim> log show` returned the simulator's own daemons
+          # regardless of the predicate and none of the app's lines. Matched on
+          # the process image path, which also covers the extension inside
+          # PlugIns/. Counted on the `[Sentry]` prefix, because a plain
+          # case-insensitive "sentry" matched 89 lines of `AssetsEntry` in a
+          # CoreData dump. Evidence, not assertion: the exact strings are
           # SDK-version-dependent.
-          xcrun simctl spawn "$MAESTRO_DEVICE" log show --last 30m --style compact \
+          log show --last 30m --style compact \
             --predicate "processImagePath CONTAINS \"$SCHEME.app\"" \
             > "$EVIDENCE/unified-log.txt" 2>&1 || true
-          echo "Unified-log lines from the app: $(wc -l < "$EVIDENCE/unified-log.txt" | tr -d ' '), mentioning Sentry: $(grep -ci sentry "$EVIDENCE/unified-log.txt" || true)"
+          echo "Unified-log lines from the app: $(wc -l < "$EVIDENCE/unified-log.txt" | tr -d ' '), with the [Sentry] prefix: $(grep -c '\[Sentry\]' "$EVIDENCE/unified-log.txt" || true)"
           xcrun simctl io "$MAESTRO_DEVICE" screenshot "$EVIDENCE/final.png" || true
+
+      # THE NSE PROBE'S MOST UNCERTAIN ASSUMPTION, checked before a simulator
+      # minute is spent on the probe and AFTER the crash flows, so a wrong
+      # assumption here can never cost the crash evidence when both probes
+      # ride one dispatch. The extension reads the push key through its
+      # `keychain-access-groups` entitlement (SharedKeychain.swift sets no
+      # group on the query), and the app writes with the group the bundle
+      # inlined. Both entitlements files spell it `$(AppIdentifierPrefix)` +
+      # `com.kangentic.mobile.shared`; on an ad-hoc simulator build with no
+      # team that prefix should expand to nothing, but nothing has verified it.
+      # So: read the entitlements out of BOTH signed bundles, print them (safe:
+      # this job installs no signing material, so no team id can appear), and
+      # fail naming the observed value when it is not the literal the app was
+      # built with. Attempt two then corrects the literal from evidence.
+      - name: Verify the shared Keychain group the simulator bundles carry
+        if: env.NSE_PROBE == 'true'
+        env:
+          APP_PATH: ${{ steps.verify.outputs.app-path }}
+        run: |
+          set -euo pipefail
+          expected_group="$EXPO_PUBLIC_KANGENTIC_IOS_KEYCHAIN_GROUP"
+          for bundle in "$APP_PATH" "$APP_PATH/PlugIns/KangenticNSE.appex"; do
+            echo "::group::Entitlements of $(basename "$bundle")"
+            entitlements="$(codesign -d --entitlements - --xml "$bundle" 2>/dev/null || codesign -d --entitlements :- "$bundle" 2>/dev/null || true)"
+            echo "$entitlements"
+            echo "::endgroup::"
+            if [ -z "$entitlements" ]; then
+              echo "::error::$(basename "$bundle") carries no readable entitlements. The ad-hoc signing did not embed any, so the app and the extension cannot share a Keychain group."
+              exit 1
+            fi
+            if ! echo "$entitlements" | grep -q "<string>$expected_group</string>"; then
+              echo "::error::$(basename "$bundle") does not carry the Keychain group the app was built to write to ($expected_group). Read the group it DOES carry above and correct the literal in 'Export the NSE probe env'."
+              exit 1
+            fi
+          done
+          echo "Both bundles carry keychain-access-group $expected_group."
 
       # THE NSE PROBE. Seeds known push vectors into the shared Keychain from
       # Settings (through the production write path), seals a push with the
@@ -909,7 +936,9 @@ jobs:
           xcrun simctl push "$MAESTRO_DEVICE" com.kangentic.mobile "$EVIDENCE/payload.json"
           sleep 4
           xcrun simctl io "$MAESTRO_DEVICE" screenshot "$EVIDENCE/banner.png" || true
-          xcrun simctl spawn "$MAESTRO_DEVICE" log show --last 5m --style compact \
+          # The HOST's unified log, for the same reason as the crash evidence
+          # step: `simctl spawn <sim> log show` ignores the predicate.
+          log show --last 5m --style compact \
             --predicate "processImagePath CONTAINS \"KangenticNSE\" OR (subsystem == \"com.apple.usernotifications\" AND eventMessage CONTAINS[c] \"kangentic\")" \
             > "$EVIDENCE/unified-log.txt" 2>&1 || true
           echo "Unified-log lines from the extension process: $(grep -c KangenticNSE "$EVIDENCE/unified-log.txt" || true)"

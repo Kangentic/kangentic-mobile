@@ -126,6 +126,17 @@ reads `io.sentry.breadcrumbs.*` manifest meta-data; iOS has no equivalent plist 
 is a larger change than this rule should smuggle in. Say "JS breadcrumbs are allowlisted", not
 "breadcrumbs are allowlisted".
 
+**The native breadcrumbs also ride a JS-CAPTURED event, and there the allowlist does reach
+them.** Observed on the first iOS event the project ever received (the handled canary from
+`build-ios.yml` run 34672597979, 2026-09-12): `started` and `ui.lifecycle`, sentry-cocoa's own
+auto-breadcrumbs, arrived on a JS-captured event that `beforeBreadcrumb` never saw them on. The
+SDK's device-context integration concatenates the native scope's breadcrumbs into every JS
+event in a `processEvent` hook (`dist/js/integrations/devicecontext.js`), which runs before
+`beforeSend`. So `scrubEvent` applies `allowlistBreadcrumb` to `event.breadcrumbs` as well,
+default-deny, and omits the key when nothing survives; `tests/unit/scrubEvent.test.ts` pins it.
+That closes the ride-along for JS-captured events on both platforms and changes nothing about a
+native crash, which still never passes through JS.
+
 **A crash caught by the operating system, not by the app's own code, carries a per-install
 identifier in `user.id` - `sendDefaultPii: false` does not stop it.** sentry-android always
 populates `contexts.device.id` (a random UUID generated once per app install, unrelated to

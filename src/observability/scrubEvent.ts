@@ -70,6 +70,25 @@ function redactHandledExceptionValues(event: ErrorEvent): ErrorEvent {
   };
 }
 
+/**
+ * The breadcrumb allowlist, applied a second time to the EVENT's own list.
+ * `beforeBreadcrumb` sees only JS-recorded breadcrumbs; the SDK's
+ * device-context integration then concatenates the NATIVE scope's
+ * breadcrumbs into every JS-captured event in a processEvent hook
+ * (`dist/js/integrations/devicecontext.js`), which runs before beforeSend.
+ * Observed on the first iOS event this project received (2026-09-12):
+ * sentry-cocoa's `started` and `ui.lifecycle` rode a JS-captured event
+ * straight past the first allowlist. Default-deny here too, and the key is
+ * omitted rather than sent empty. A NATIVE crash never passes through here;
+ * see the header of crashReporting.ts for that limitation.
+ */
+function allowlistEventBreadcrumbs(event: ErrorEvent): ErrorEvent {
+  if (event.breadcrumbs === undefined) return event;
+  const { breadcrumbs, ...rest } = event;
+  const allowed = breadcrumbs.filter((breadcrumb) => allowlistBreadcrumb(breadcrumb) !== null);
+  return allowed.length === 0 ? rest : { ...rest, breadcrumbs: allowed };
+}
+
 export function scrubEvent(event: ErrorEvent): ErrorEvent {
   const {
     user: _user,
@@ -78,7 +97,7 @@ export function scrubEvent(event: ErrorEvent): ErrorEvent {
     server_name: _serverName,
     contexts,
     ...rest
-  } = redactHandledExceptionValues(event);
+  } = redactHandledExceptionValues(allowlistEventBreadcrumbs(event));
   if (contexts === undefined) return rest;
   const { response: _response, ...scrubbedContexts } = contexts;
   // Omit `contexts` rather than sending an empty object, including when

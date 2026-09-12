@@ -384,9 +384,13 @@ configured, and `.claude/rules/crash-reporting-scope.md` is the rule that keeps 
   `signal_strength`, `download_bandwidth`, and `upload_bandwidth` - more detail than "coarse
   app-lifecycle timing" suggested before this was verified. None of it is session content.
   Closing this needs native configuration through a config plugin, not a JS option; it is a named
-  gap, not an oversight. iOS app-hang and watchdog-termination reporting are likewise left at
-  their native defaults (on), deliberately: a hang and an out-of-memory kill are the app
-  breaking, which is what this reports.
+  gap, not an oversight. The same native breadcrumbs also rode a JS-captured event on iOS
+  (`started` and `ui.lifecycle`, observed on the first iOS event the project received, 2026-09-12),
+  because the SDK merges the native scope's breadcrumbs into every JS event before `beforeSend`;
+  that half IS reachable from JS, so `scrubEvent` now applies the same default-deny allowlist to
+  the event's breadcrumb list, on both platforms. iOS app-hang and watchdog-termination reporting
+  are likewise left at their native defaults (on), deliberately: a hang and an out-of-memory kill
+  are the app breaking, which is what this reports.
 - **What the native SDK sends that `sendDefaultPii: false` does not stop: a per-install
   identifier, on a crash the OS catches rather than the app's own code.** sentry-android always
   populates `contexts.device.id` (a random UUID generated once per app install - not

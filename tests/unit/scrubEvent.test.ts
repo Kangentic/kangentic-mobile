@@ -86,6 +86,32 @@ describe('scrubEvent', () => {
     expect(scrubbed.exception?.values?.[0]?.value).toBe('undefined is not a function');
   });
 
+  it('applies the breadcrumb allowlist to the event itself, where the native SDK merges its own breadcrumbs', () => {
+    // beforeBreadcrumb sees only JS-recorded breadcrumbs. The SDK's
+    // device-context integration then CONCATENATES the native scope's
+    // breadcrumbs into every JS-captured event in a processEvent hook, which
+    // runs before beforeSend - observed on the first iOS event the project
+    // received (run 34672597979): `started` and `ui.lifecycle` rode a
+    // JS-captured event past the allowlist. This is the second place the
+    // allowlist has to be applied, and it is default-deny like the first.
+    const scrubbed = scrubEvent(
+      errorEvent({
+        breadcrumbs: [
+          { category: 'started', message: 'App started' },
+          { category: 'ui.lifecycle', data: { state: 'UIApplicationDidBecomeActiveNotification' } },
+          { category: 'sentry.event', message: 'An event was sent' },
+          { message: 'no category at all' },
+        ],
+      }),
+    );
+    expect(scrubbed.breadcrumbs?.map((breadcrumb) => breadcrumb.category)).toEqual(['sentry.event']);
+  });
+
+  it('leaves breadcrumbs absent when nothing survives the allowlist, rather than sending an empty list', () => {
+    const scrubbed = scrubEvent(errorEvent({ breadcrumbs: [{ category: 'ui.lifecycle' }, { category: 'started' }] }));
+    expect('breadcrumbs' in scrubbed).toBe(false);
+  });
+
   it('leaves contexts absent rather than inventing an empty object', () => {
     const scrubbed = scrubEvent(errorEvent());
     expect('contexts' in scrubbed).toBe(false);
