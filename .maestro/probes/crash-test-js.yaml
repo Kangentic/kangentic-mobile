@@ -1,0 +1,66 @@
+appId: com.kangentic.mobile
+---
+# CRASH-REPORTING PROBE. Not a test, and not part of either E2E suite.
+#
+# Makes the app die of a deliberate JS throw so the Sentry `mobile` project
+# receives an iOS event: until this existed it had never received one from any
+# iOS build (task #67), and nothing short of a delivered event tells "iOS is
+# stable" apart from "iOS reporting is dead". See the crash reporting section
+# of docs/developer-guide.md.
+#
+# Only `build-ios.yml -f crash_test=true` runs it, against a Release simulator
+# build whose bundle carries EXPO_PUBLIC_KANGENTIC_CRASHTEST=1. On any other
+# build the crash rows do not exist and scrollUntilVisible times out, which is
+# the correct outcome: there is nothing to tap. tests/unit/ciSafeMaestroFlows.test.ts
+# keeps this directory out of e2e.yml.
+#
+# The relaunch that ships the stored envelope, and the wait for the upload,
+# live in the workflow step, not here: Maestro has no sleep primitive, and
+# sentry-cocoa writes a fatal event to disk to send on the NEXT launch
+# (RNSentry.mm, storeEnvelope for hardCrashed). That is as true of the JS
+# throw as of the native crash - the JS handler flushes for two seconds and
+# then hands to the default handler, which aborts the process.
+- launchApp
+# App-ready gate, same reasoning and selector as smoke.yaml: a bare
+# assertVisible gets only the short implicit wait, which races a cold CI
+# simulator, and the tab bar is native chrome with no testID of ours.
+- extendedWaitUntil:
+    visible:
+      text: "Agents"
+    timeout: 45000
+- tapOn:
+    id: "header-settings-button"
+- extendedWaitUntil:
+    visible:
+      id: "settings-screen"
+    timeout: 20000
+# The handled-error canary first, while the app is still alive. It reports a
+# CapabilityError whose message must NOT arrive in Sentry (the door redacts
+# it), and it does not crash, so it costs nothing to send before the throw.
+# Guarded rather than asserted so a build cut before the row existed still
+# runs the crash below.
+- runFlow:
+    when:
+      visible:
+        id: "settings-crash-test-handled"
+    commands:
+      - tapOn:
+          id: "settings-crash-test-handled"
+# The crash-test section sits below Feedback and Dictation, so it may be
+# under the fold on the picked simulator.
+- scrollUntilVisible:
+    element:
+      id: "settings-crash-test-js"
+    direction: DOWN
+    visibilityPercentage: 50
+    timeout: 30000
+- tapOn:
+    id: "settings-crash-test-js"
+# The throw is on a 0 ms timer; the SDK flushes for up to two seconds, then
+# RCTFatal aborts the process. The settings screen vanishing is this flow's
+# assertion that the crash happened; the workflow confirms it against a crash
+# report in ~/Library/Logs/DiagnosticReports, which is the verdict.
+- extendedWaitUntil:
+    notVisible:
+      id: "settings-screen"
+    timeout: 20000

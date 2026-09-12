@@ -241,10 +241,40 @@ describe('initializeCrashReporting', () => {
   // Bonus coverage beyond the two branches asked for: this repo's vitest tier does not define
   // __DEV__ by default (confirmed against tests/unit/connectionManager.test.ts and
   // tests/unit/qr.test.ts, which both stub it explicitly before reaching code that reads it),
-  // so all three branches are honestly reachable by stubbing the global ourselves the same way.
+  // so all four branches are honestly reachable by stubbing the global ourselves the same way.
   it('resolves environment to development when __DEV__ is true, regardless of the e2e flag', async () => {
     setSentryDsn(testDsn);
     setE2eFlag('1');
+    vi.stubGlobal('__DEV__', true);
+
+    const crashReporting = await loadFreshCrashReporting();
+    crashReporting.initializeCrashReporting();
+
+    expect(requireCapturedInitOptions().environment).toBe('development');
+  });
+
+  it('resolves environment to crash-test when the crash-test flag is "1", ahead of e2e', async () => {
+    // A crash-test build reports the SAME release string as the shipped build
+    // it was cut from (build-ios.yml's simulator probe and App Store build 13
+    // both read `0.6.3+13` from app.config.ts), so the environment is the only
+    // thing that keeps a deliberate crash out of the production stream the
+    // /sentry triage sweep filters on. Ahead of e2e because a deliberate crash
+    // is the dominant fact about the build, whatever else it carries.
+    setSentryDsn(testDsn);
+    setE2eFlag('1');
+    setCrashTestFlag('1');
+    vi.stubGlobal('__DEV__', false);
+
+    const crashReporting = await loadFreshCrashReporting();
+    crashReporting.initializeCrashReporting();
+
+    expect(requireCapturedInitOptions().environment).toBe('crash-test');
+  });
+
+  it('still resolves environment to development under __DEV__ even with the crash-test flag', async () => {
+    setSentryDsn(testDsn);
+    setE2eFlag(undefined);
+    setCrashTestFlag('1');
     vi.stubGlobal('__DEV__', true);
 
     const crashReporting = await loadFreshCrashReporting();

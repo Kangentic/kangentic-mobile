@@ -104,12 +104,16 @@ real, untracked backlog. The answer to "any new issues?" is **tier 2's untracked
 the duplicate guard below) - report that as the headline. State the tier-1 count as a separate
 supporting line, never lead with it, and never report "0 new issues" off tier 1 alone.
 
-Filter noise by environment. `crashReporting.ts` sets exactly three environment values, not
-two: `development`, `e2e`, or `production`. A Maestro APK is release-shaped (`__DEV__` is
-false) and reports as `e2e`, which is exactly as much noise as `development` - a dispatched
-E2E run is not a user's device. Query with `&environment=production` to get user-facing issues
-only. If dev/e2e issues are worth mentioning at all, report them in a clearly separate block,
-never interleaved with production issues.
+Filter noise by environment. `crashReporting.ts` sets exactly four environment values, not
+two: `development`, `crash-test`, `e2e`, or `production`. A Maestro APK is release-shaped
+(`__DEV__` is false) and reports as `e2e`, which is exactly as much noise as `development` - a
+dispatched E2E run is not a user's device. `crash-test` is a `crash_test` dispatch of either
+build workflow: deliberate crashes driven from the Settings crash rows, on a CI simulator or a
+maintainer's device, never a user's. It has its own value rather than riding `production`
+because such a build carries the SAME release string as the shipped build it was cut from.
+Query with `&environment=production` to get user-facing issues only. If dev/e2e/crash-test
+issues are worth mentioning at all, report them in a clearly separate block, never interleaved
+with production issues.
 
 Verify the environment filter actually narrows the result before trusting it silently - the
 same query with and without it can return an identical set for reasons other than the filter

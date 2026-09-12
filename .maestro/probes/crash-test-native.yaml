@@ -1,0 +1,36 @@
+appId: com.kangentic.mobile
+---
+# CRASH-REPORTING PROBE, the native half. Not a test, and not part of either
+# E2E suite. See crash-test-js.yaml for the full reasoning; this flow differs
+# only in the row it taps.
+#
+# `Sentry.nativeCrash()` on iOS is a signal-level crash caught by
+# sentry-cocoa's SentryCrash handler - the path no JavaScript `beforeSend` can
+# see, and the one that decides whether iOS dSYMs symbolicate at all. Like the
+# JS throw, the envelope is stored on disk and sent on the NEXT launch, which
+# the workflow step performs.
+- launchApp
+- extendedWaitUntil:
+    visible:
+      text: "Agents"
+    timeout: 45000
+- tapOn:
+    id: "header-settings-button"
+- extendedWaitUntil:
+    visible:
+      id: "settings-screen"
+    timeout: 20000
+- scrollUntilVisible:
+    element:
+      id: "settings-crash-test-native"
+    direction: DOWN
+    visibilityPercentage: 50
+    timeout: 30000
+- tapOn:
+    id: "settings-crash-test-native"
+# The process dies inside the tap. The screen vanishing is the assertion; the
+# workflow confirms the crash against a crash report.
+- extendedWaitUntil:
+    notVisible:
+      id: "settings-screen"
+    timeout: 20000

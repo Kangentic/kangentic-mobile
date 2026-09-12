@@ -147,21 +147,32 @@ export function initializeCrashReporting(): void {
     // sentry-android/sentry-cocoa logging of what it actually sends -
     // envelope contents included. Off in every other build.
     debug: crashTestEnabled(),
-    // Three environment VALUES, not one per EAS profile: `development` and
-    // `e2e` would otherwise land in the same 5,000-event budget as
-    // "production" and be indistinguishable from a real user's crash.
-    // E2E matters as much as dev here: a Maestro APK is release-shaped, so
-    // __DEV__ is FALSE in it, and a dispatched `profile=e2e` build does
-    // receive the DSN (the workflow's HAS_SENTRY gate is job-level and
-    // covers every matrix profile). Without this branch every smoke-flow
-    // crash would be filed as a production incident. `preview` sets
-    // neither __DEV__ nor the e2e flag, so it deliberately falls through to
-    // `production` too - a fourth EAS profile, not a fourth environment.
+    // Four environment VALUES, not one per EAS profile: `development`,
+    // `crash-test` and `e2e` would otherwise land in the same 5,000-event
+    // budget as "production" and be indistinguishable from a real user's
+    // crash. E2E matters as much as dev here: a Maestro APK is
+    // release-shaped, so __DEV__ is FALSE in it, and a dispatched
+    // `profile=e2e` build does receive the DSN (the workflow's HAS_SENTRY
+    // gate is job-level and covers every matrix profile). Without this
+    // branch every smoke-flow crash would be filed as a production incident.
+    // `crash-test` sits ahead of `e2e` because a deliberate crash is the
+    // dominant fact about a build, and it needs its own value for a sharper
+    // reason than noise: a crash-test build reports the SAME release string
+    // as the shipped build it was cut from (the iOS simulator probe and App
+    // Store build 13 both read `0.6.3+13` from app.config.ts, and overriding
+    // the release in JS would desynchronise it from the symbols the Xcode
+    // phase uploads under the Info.plist value), so the environment is the
+    // only thing that keeps a deliberate crash out of the production stream
+    // the /sentry triage sweep filters on. `preview` sets none of the three
+    // flags, so it deliberately falls through to `production` too - a fourth
+    // EAS profile, not a fifth environment.
     environment: __DEV__
       ? 'development'
-      : process.env.EXPO_PUBLIC_KANGENTIC_E2E === '1'
-        ? 'e2e'
-        : 'production',
+      : crashTestEnabled()
+        ? 'crash-test'
+        : process.env.EXPO_PUBLIC_KANGENTIC_E2E === '1'
+          ? 'e2e'
+          : 'production',
 
     // --- Privacy, set at the source because beforeSend cannot reach native events ---
     sendDefaultPii: false,

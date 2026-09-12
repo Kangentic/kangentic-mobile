@@ -53,6 +53,10 @@ on:
         options:
           - 'false'
           - 'true'
+      crash_test:
+        description: 'Reveal the crash-reporting test rows in Settings and drive them on the simulator so Sentry receives iOS events. For verifying delivery and what a crash report contains; never for a store submission.'
+        type: boolean
+        default: false
   # Weekly drift detection. Nothing here is PR-triggered, so without a schedule the
   # only way to learn that a runner Xcode bump, a dependency update, or an Apple
   # toolchain change broke the iOS build is to want a release and discover it then.
@@ -100,12 +104,91 @@ jobs:
     if: github.event_name == 'schedule' || inputs.target != 'device'
     runs-on: macos-latest
     timeout-minutes: 90
+    env:
+      # Same shape as the device job's. Read ONLY by the crash-test probe
+      # below: the plain compile check never touches a secret and uploads
+      # nothing, and the export step's condition is what keeps it that way.
+      HAS_SENTRY: ${{ secrets.SENTRY_AUTH_TOKEN != '' && vars.SENTRY_DSN != '' }}
+      # `inputs` are all empty on the weekly cron, so the probe names the
+      # event rather than leaning on an input default - the same trap as the
+      # job's own `if:` above. A cron run must never crash-test anything.
+      CRASH_TEST: ${{ github.event_name == 'workflow_dispatch' && inputs.crash_test == true }}
 
     steps:
+      # iOS has no `plan` job, so the refusal build-android.yml puts there is
+      # the first step of BOTH build jobs instead: at least one of them runs on
+      # any dispatch, whatever `target` says, so the operator's intent is
+      # checked before a runner minute is spent. A crash-test build reveals
+      # Settings rows that crash the app and turns on the SDK's debug logging;
+      # it must never reach TestFlight. submit-testflight refuses it too.
+      - name: Refuse a probe build that is also a store submission
+        if: inputs.crash_test == true && inputs.submit == 'testflight'
+        run: |
+          set -euo pipefail
+          echo "::error::crash_test and submit=testflight are mutually exclusive. A crash-test build reveals the Settings crash rows and enables Sentry debug logging, so it must never be uploaded to App Store Connect. Dispatch them as two separate runs."
+          exit 1
+
+      # A screenshot run skips the `Launch the app on a simulator` step, which
+      # is the only writer of `steps.smoke.outputs.device-id`, so the probe
+      # flows would run against `maestro --device ""` and fail after the
+      # 25-minute build - reading as iOS-driver flakiness rather than as a
+      # dispatch that asked for two incompatible things.
+      - name: Refuse a probe build combined with the screenshot capture
+        if: inputs.crash_test == true && inputs.screenshots == 'true'
+        run: |
+          set -euo pipefail
+          echo "::error::crash_test and screenshots=true are mutually exclusive: the screenshot capture boots its own simulator and skips the launch step the probe drives. Dispatch them as two separate runs."
+          exit 1
+
       - uses: actions/checkout@v7
 
       - name: Set up Node and dependencies
         uses: ./.github/actions/setup-node-deps
+
+      # A crash-test build's whole purpose is a delivered event. Without a DSN
+      # it would spend 25 minutes building an app that reports nowhere, and the
+      # device job's `::notice::` for the same condition is not loud enough for
+      # a run that exists only to be read back from Sentry.
+      - name: Refuse a crash test without Sentry configured
+        if: env.CRASH_TEST == 'true' && env.HAS_SENTRY != 'true'
+        run: |
+          set -euo pipefail
+          echo "::error::crash_test needs both the SENTRY_AUTH_TOKEN secret and the SENTRY_DSN variable, or the build reports nowhere and uploads no symbols. See the crash reporting section of docs/developer-guide.md."
+          exit 1
+
+      # The device job's export, gated on the PROBE rather than on HAS_SENTRY
+      # alone, so a default dispatch and the weekly cron stay secret-free and
+      # upload no symbols. Same pre-prebuild requirement: app.config.ts reads
+      # SENTRY_AUTH_TOKEN at config-evaluation time to decide whether to add
+      # the Sentry plugin (the Xcode phases that upload source maps and dSYMs),
+      # and the DSN is inlined into the bundle by the build phase prebuild sets
+      # up. Exported late, the crash arrives unsymbolicated or not at all, with
+      # every step green.
+      - name: Export the Sentry build env
+        if: env.CRASH_TEST == 'true' && env.HAS_SENTRY == 'true'
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_DSN: ${{ vars.SENTRY_DSN }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$SENTRY_AUTH_TOKEN"
+          {
+            echo "SENTRY_AUTH_TOKEN=$SENTRY_AUTH_TOKEN"
+            echo "EXPO_PUBLIC_SENTRY_DSN=$SENTRY_DSN"
+          } >> "$GITHUB_ENV"
+          echo "Sentry is enabled for this crash-test build: dSYMs and source maps upload, crash reporting is active."
+          echo "Reporting to: $SENTRY_DSN"
+
+      # Mirrors build-android.yml's step of the same name. EXPO_PUBLIC_* is
+      # inlined at bundle time, so this too must precede prebuild; exported
+      # late, Settings never reveals the rows and the flows time out scrolling
+      # for a testID that does not exist.
+      - name: Export the crash-test flag
+        if: env.CRASH_TEST == 'true'
+        run: |
+          set -euo pipefail
+          echo "EXPO_PUBLIC_KANGENTIC_CRASHTEST=1" >> "$GITHUB_ENV"
+          echo "::notice::Crash-test rows are enabled in Settings for this build, and it reports to the crash-test Sentry environment. It is a probe, not a distribution artifact."
 
       - name: Generate the native iOS project
         # CNG: ios/ is produced here and never committed. See
@@ -147,6 +230,24 @@ jobs:
         id: xcode
         run: bash .github/scripts/resolve-ios-scheme.sh
 
+      # Only a probe needs this. It prints the release string the delivered
+      # events will carry (`com.kangentic.mobile@<version>+<buildNumber>`),
+      # which is how the desk-side verification in docs/developer-guide.md
+      # finds them - and it is the SAME string as the shipped build cut from
+      # this version, which is why the events are tagged `environment:
+      # crash-test` rather than `production`.
+      - name: Read the app version
+        id: version
+        if: env.CRASH_TEST == 'true'
+        run: |
+          set -euo pipefail
+          npx expo config --json > "$RUNNER_TEMP/expo-config.json"
+          read_config_field() {
+            node -e "const c=JSON.parse(require('node:fs').readFileSync(process.argv[1],'utf8'));process.stdout.write(String($1))" "$RUNNER_TEMP/expo-config.json"
+          }
+          echo "version-name=$(read_config_field 'c.version')" >> "$GITHUB_OUTPUT"
+          echo "build-number=$(read_config_field 'c.ios.buildNumber')" >> "$GITHUB_OUTPUT"
+
       - name: Build for the simulator
         env:
           WORKSPACE: ${{ steps.xcode.outputs.workspace }}
@@ -170,11 +271,12 @@ jobs:
           FORCE_BUNDLING: ${{ inputs.screenshots == 'true' && '1' || '' }}
           EXPO_PUBLIC_KANGENTIC_MOCK: ${{ inputs.screenshots == 'true' && '1' || '' }}
           BUILD_CONFIGURATION: ${{ inputs.screenshots == 'true' && 'Debug' || 'Release' }}
-          SIGN_AD_HOC: ${{ inputs.screenshots == 'true' && '1' || '' }}
+          SIGN_AD_HOC: ${{ (inputs.screenshots == 'true' || inputs.crash_test == true) && '1' || '' }}
         run: |
           set -euo pipefail
 
-          # AD-HOC SIGN THE SCREENSHOT BUILD, and only that one.
+          # AD-HOC SIGN THE SCREENSHOT BUILD AND THE CRASH-TEST PROBE, and only
+          # those.
           #
           # An unsigned app has no entitlements at all, including
           # `application-identifier` - and without it every keychain call fails
@@ -188,6 +290,15 @@ jobs:
           # turns the capture into the first real exercise of iOS keychain
           # access, which matters well beyond screenshots: the pairing trust
           # anchor lives in expo-secure-store.
+          #
+          # The crash-test probe needs it for a different reason: those same
+          # keychain rejections are unhandled promise rejections at boot, and
+          # the Sentry SDK tracks Hermes promise rejections, so an unsigned
+          # probe would report entitlement noise into the very run that exists
+          # to deliver two clean, deliberate crashes. The probe stays on the
+          # RELEASE configuration, deliberately: a JS throw is fatal only in
+          # Release, the bundle is embedded, and the dSYM phase does not skip
+          # it.
           #
           # The plain compile check stays UNSIGNED. It exists to be runnable by
           # anyone with no Apple setup whatsoever, and nothing about it needs the
@@ -279,6 +390,35 @@ jobs:
             exit 1
           fi
           echo "Produced $SCHEME.app ($(du -sh "$app_path" | cut -f1))."
+
+          # The Notification Service Extension compiles as its own target and
+          # is EMBEDDED by a copy phase; a green build proves the first and not
+          # the second. An app whose PlugIns/ holds no extension installs,
+          # launches and renders every push as the generic placeholder, which
+          # is exactly the failure docs/developer-guide.md says a delivered
+          # notification cannot distinguish from the extension never running.
+          appex_executable="$app_path/PlugIns/KangenticNSE.appex/KangenticNSE"
+          if [ ! -f "$appex_executable" ]; then
+            echo "::error::$SCHEME.app carries no PlugIns/KangenticNSE.appex executable. The extension compiled but was not embedded, so no push could ever be decrypted on this build."
+            ls -R "$app_path/PlugIns" 2>/dev/null || echo "(no PlugIns directory at all)"
+            exit 1
+          fi
+          echo "Embedded PlugIns/KangenticNSE.appex."
+
+          # For the crash-test probe only: the Sentry debug-files phase uploads
+          # whatever dSYM the build emitted, and with none the native crash
+          # arrives as bare addresses while every step stays green. The device
+          # job asserts the same thing from the build settings; here the
+          # product itself is the proof.
+          if [ "${CRASH_TEST:-}" = "true" ]; then
+            dsym_path="$RUNNER_TEMP/DerivedData/Build/Products/$BUILD_CONFIGURATION-iphonesimulator/$SCHEME.app.dSYM"
+            if [ ! -d "$dsym_path" ]; then
+              echo "::error::No $SCHEME.app.dSYM beside the app, so the Sentry debug-files phase had nothing to upload and the native crash will arrive unsymbolicated."
+              ls "$RUNNER_TEMP/DerivedData/Build/Products/$BUILD_CONFIGURATION-iphonesimulator" || true
+              exit 1
+            fi
+            echo "Produced $SCHEME.app.dSYM for the Sentry upload phase."
+          fi
           echo "app-path=$app_path" >> "$GITHUB_OUTPUT"
 
       # Compiling is not running. Until this step existed the iOS app had never
@@ -299,9 +439,10 @@ jobs:
         if: inputs.screenshots != 'true'
         env:
           APP_PATH: ${{ steps.verify.outputs.app-path }}
-          # Keeps the simulator up for the Maestro step below, which drives the
-          # same one. Booting a simulator takes over a minute.
-          KEEP_SIMULATOR_BOOTED: ${{ inputs.maestro != 'none' && '1' || '' }}
+          # Keeps the simulator up for the Maestro steps below (the smoke flow
+          # and the crash-test probe), which drive the same one. Booting a
+          # simulator takes over a minute.
+          KEEP_SIMULATOR_BOOTED: ${{ (inputs.maestro != 'none' || inputs.crash_test == true) && '1' || '' }}
         run: bash .github/scripts/smoke-ios-simulator.sh "$APP_PATH" com.kangentic.mobile "$RUNNER_TEMP/launch.png"
 
       # App Store listing screenshots. EXPERIMENTAL and opt-in: see the header of
@@ -536,7 +677,8 @@ jobs:
       # terminal needs a paired session, which needs the stub desktop peer and the
       # `usesCleartextTraffic` carve-out that is still unlanded.
       - name: Install Maestro and its iOS driver
-        if: inputs.maestro != 'none'
+        # The crash-test probe drives its flows with the same driver.
+        if: inputs.maestro != 'none' || inputs.crash_test == true
         run: |
           set -euo pipefail
           brew tap facebook/fb
@@ -568,6 +710,118 @@ jobs:
             --debug-output "$RUNNER_TEMP/maestro-ios-debug" \
             --flatten-debug-output
 
+      # THE iOS CRASH-TEST PROBE. Until this existed the Sentry `mobile`
+      # project had never received an event from any iOS build (task #67), and
+      # nothing short of a delivered event tells "iOS is stable" apart from
+      # "iOS reporting is dead". Two deliberate crashes, each followed by a
+      # relaunch, because sentry-cocoa stores a fatal event's envelope on disk
+      # and sends it on the NEXT launch (RNSentry.mm's storeEnvelope for
+      # hardCrashed) - and that is as true of the JS throw as of the native
+      # crash: the JS handler flushes for two seconds and then hands to the
+      # default handler, which aborts. A probe that taps and never relaunches
+      # proves the crash happened and delivers nothing.
+      #
+      # Maestro's exit code is a WARNING here, not the verdict. The iOS driver
+      # may lose the app the instant it dies after the tap and call that a
+      # flow failure; the crash report in ~/Library/Logs/DiagnosticReports is
+      # what says the tap landed, so that is what this step asserts on.
+      #
+      # Maestro has no sleep primitive, which is why the relaunch and the
+      # upload wait live here rather than in the flows. Sentry.init runs at
+      # bundle entry (index.js), so the outbox starts flushing as soon as the
+      # process is up; 25 s covers a cold runner's DNS and TLS with margin.
+      #
+      # Expect exactly ONE Sentry event per crash: RNSentry.mm installs a
+      # native beforeSend that drops the "Unhandled JS Exception" twin of the
+      # JS throw, the same dedup sentry-android does with JavascriptException.
+      - name: Run the crash-test flows
+        if: env.CRASH_TEST == 'true'
+        timeout-minutes: 20
+        env:
+          MAESTRO_DEVICE: ${{ steps.smoke.outputs.device-id }}
+          EVIDENCE: ${{ runner.temp }}/crash-evidence
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE"
+          # BSD find has no reliable "@epoch" form; a marker file is the
+          # portable "newer than the start of this step".
+          touch "$EVIDENCE/run-start.marker"
+
+          crash_reports() {
+            find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name '*.ips' -newer "$EVIDENCE/run-start.marker" -print0 2>/dev/null \
+              | xargs -0 grep -l 'com.kangentic.mobile' 2>/dev/null || true
+          }
+          relaunch_and_flush() {
+            xcrun simctl launch "$MAESTRO_DEVICE" com.kangentic.mobile
+            sleep 25
+          }
+          run_flow() {
+            maestro --device "$MAESTRO_DEVICE" test "$1" \
+              --format JUNIT --output "$EVIDENCE/$2.xml" \
+              --debug-output "$EVIDENCE/$2-debug" --flatten-debug-output \
+              || echo "::warning::$1 did not exit cleanly; deciding on the crash report instead."
+            sleep 5
+          }
+
+          maestro --version
+          run_flow .maestro/probes/crash-test-js.yaml js
+          if [ -z "$(crash_reports)" ]; then
+            echo "::error::No crash report for com.kangentic.mobile after the JS throw. Either the tap never landed (read js-debug in the ios-probe-evidence artifact) or this bundle does not carry EXPO_PUBLIC_KANGENTIC_CRASHTEST=1."
+            exit 1
+          fi
+          relaunch_and_flush
+
+          run_flow .maestro/probes/crash-test-native.yaml native
+          report_count="$(crash_reports | wc -l | tr -d ' ')"
+          if [ "$report_count" -lt 2 ]; then
+            echo "::error::Expected two crash reports (the JS throw, then the native crash) and found $report_count."
+            exit 1
+          fi
+          relaunch_and_flush
+          echo "Two deliberate crashes recorded and the app relaunched after each. Sentry should now hold two iOS events under environment crash-test."
+
+      # Always collected, even when the step above failed: the crash reports,
+      # the unified log and the Maestro debug output are what turn a silent
+      # non-delivery into a diagnosable one.
+      - name: Collect the crash evidence
+        if: always() && env.CRASH_TEST == 'true'
+        env:
+          MAESTRO_DEVICE: ${{ steps.smoke.outputs.device-id }}
+          EVIDENCE: ${{ runner.temp }}/crash-evidence
+          SCHEME: ${{ steps.xcode.outputs.scheme }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$EVIDENCE"
+          if [ -f "$EVIDENCE/run-start.marker" ]; then
+            find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name '*.ips' -newer "$EVIDENCE/run-start.marker" -print0 2>/dev/null \
+              | xargs -0 grep -l 'com.kangentic.mobile' 2>/dev/null \
+              | while IFS= read -r report; do cp "$report" "$EVIDENCE/"; done
+          fi
+          echo "Crash reports collected: $(find "$EVIDENCE" -maxdepth 1 -name '*.ips' | wc -l | tr -d ' ')"
+          # sentry-cocoa logs through NSLog under the APP's process when
+          # `debug: true` (which the crash-test flag turns on), so the process
+          # clause is the load-bearing one; a `subsystem` match would find
+          # nothing. Evidence, not assertion: the exact strings are
+          # SDK-version-dependent.
+          xcrun simctl spawn "$MAESTRO_DEVICE" log show --last 30m --style compact \
+            --predicate "process == \"$SCHEME\" OR eventMessage CONTAINS[c] \"sentry\"" \
+            > "$EVIDENCE/unified-log.txt" 2>&1 || true
+          echo "Unified-log lines mentioning Sentry: $(grep -ci sentry "$EVIDENCE/unified-log.txt" || true)"
+          xcrun simctl io "$MAESTRO_DEVICE" screenshot "$EVIDENCE/final.png" || true
+
+      - name: Upload the probe evidence
+        if: always() && env.CRASH_TEST == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-probe-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/crash-evidence
+          retention-days: 14
+          if-no-files-found: warn
+          # Maestro writes its debug output under a dot directory, which
+          # upload-artifact skips by default - the screenshot artifact learned
+          # this by uploading empty.
+          include-hidden-files: true
+
       - name: Upload the Maestro output
         if: always() && inputs.maestro != 'none'
         uses: actions/upload-artifact@v7
@@ -595,15 +849,27 @@ jobs:
         if: always()
         env:
           SCHEME: ${{ steps.xcode.outputs.scheme }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version-name }}
+          RELEASE_BUILD: ${{ steps.version.outputs.build-number }}
         run: |
           {
             echo "### iOS simulator build and launch"
             echo ""
             echo "App scheme: \`${SCHEME:-unresolved}\`"
             echo ""
-            echo "Unsigned simulator build, so it is not installable on a device and not a"
-            echo "distribution artifact. It IS launched on a simulator, and the run's"
-            echo "\`ios-simulator-launch-*\` artifact holds a screenshot of what rendered."
+            if [ "${CRASH_TEST:-}" = "true" ]; then
+              echo "**Crash-test probe.** An ad-hoc-signed Release simulator build carrying the DSN and"
+              echo "\`EXPO_PUBLIC_KANGENTIC_CRASHTEST=1\`. Two deliberate crashes were driven from Settings and"
+              echo "the app was relaunched after each, so Sentry should hold two iOS events under environment"
+              echo "\`crash-test\` for release \`com.kangentic.mobile@${RELEASE_VERSION:-?}+${RELEASE_BUILD:-?}\`."
+              echo "Evidence (crash reports, unified log, Maestro output) is in the \`ios-probe-evidence-*\`"
+              echo "artifact. Verify from the desk with the recipe in the crash reporting section of"
+              echo "docs/developer-guide.md."
+            else
+              echo "Unsigned simulator build, so it is not installable on a device and not a"
+              echo "distribution artifact. It IS launched on a simulator, and the run's"
+              echo "\`ios-simulator-launch-*\` artifact holds a screenshot of what rendered."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
   device:
@@ -638,6 +904,19 @@ jobs:
       HAS_SENTRY: ${{ secrets.SENTRY_AUTH_TOKEN != '' && vars.SENTRY_DSN != '' }}
 
     steps:
+      # The simulator job's copy of the same refusal, so it is unconditional
+      # across `target` values. This job does not otherwise honour
+      # `crash_test`: a distribution-signed probe .ipa would be installable
+      # only through TestFlight, which the refusal makes impossible, so it
+      # would be a 30-minute artifact nobody can run. The simulator job is
+      # where the probe lives.
+      - name: Refuse a probe build that is also a store submission
+        if: inputs.crash_test == true && inputs.submit == 'testflight'
+        run: |
+          set -euo pipefail
+          echo "::error::crash_test and submit=testflight are mutually exclusive. A crash-test build reveals the Settings crash rows and enables Sentry debug logging, so it must never be uploaded to App Store Connect. Dispatch them as two separate runs."
+          exit 1
+
       - uses: actions/checkout@v7
 
       # Fails immediately rather than degrading. The Android job can fall back
@@ -1042,7 +1321,10 @@ jobs:
   submit-testflight:
     name: Submit (TestFlight)
     needs: device
-    if: github.event_name != 'schedule' && inputs.submit == 'testflight'
+    # `inputs.crash_test != true` is belt-and-braces to the refusal step at the
+    # top of both build jobs, mirroring submit-play on Android: a probe build
+    # must not reach App Store Connect even if that step were ever removed.
+    if: github.event_name != 'schedule' && inputs.submit == 'testflight' && inputs.crash_test != true
     runs-on: macos-latest
     timeout-minutes: 60
     environment: app-store-connect

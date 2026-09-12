@@ -22,7 +22,7 @@
  * tests/unit/appConfigBrand.test.ts.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -664,6 +664,177 @@ describe('build-ios workflow', () => {
     expect(readIosJob('submit-testflight')).toContain("github.event_name != 'schedule'");
     // And the cheap check must still run, or the schedule detects nothing.
     expect(readIosJob('simulator')).toContain("github.event_name == 'schedule'");
+  });
+});
+
+/**
+ * The iOS crash-test probe: `build-ios.yml -f crash_test=true` builds a
+ * Release simulator app that carries the DSN and the crash-test flag, drives
+ * the Settings crash rows with Maestro, relaunches after each crash so the
+ * stored envelopes ship, and uploads the evidence. It exists because the
+ * Sentry `mobile` project had never received an event from ANY iOS build
+ * (task #67), and nothing short of a delivered event distinguishes "iOS is
+ * stable" from "iOS reporting is dead".
+ *
+ * Every assertion here targets a step or expression that did not exist before
+ * the probe was added, so each was red against the previous workflow.
+ */
+describe('build-ios crash-test probe', () => {
+  interface IosWorkflowStep {
+    name?: string;
+    if?: string;
+    run?: string;
+    env?: Record<string, string>;
+    with?: Record<string, unknown>;
+  }
+  interface IosWorkflowShape {
+    on: { workflow_dispatch: { inputs: Record<string, { type?: string; default?: unknown }> } };
+    jobs: Record<string, { if?: string; env?: Record<string, string>; steps?: IosWorkflowStep[] }>;
+  }
+  const iosWorkflow = parseYaml(iosWorkflowSource) as IosWorkflowShape;
+
+  function requireStep(jobName: string, stepName: string): IosWorkflowStep {
+    const step = iosWorkflow.jobs[jobName]?.steps?.find((candidate) => candidate.name === stepName);
+    expect(step, `build-ios.yml job "${jobName}" has no step named "${stepName}"`).toBeDefined();
+    return step ?? {};
+  }
+
+  it('exports the Sentry env before prebuild in the simulator job too', () => {
+    // Same GITHUB_ENV ordering as the device job: app.config.ts reads
+    // SENTRY_AUTH_TOKEN at config-evaluation time to include the plugin that
+    // uploads source maps and dSYMs, and the DSN is inlined by the bundling
+    // phase prebuild sets up. Exported late, the crash arrives unsymbolicated
+    // or not at all, with every step green.
+    const simulatorJob = readIosJob('simulator');
+    const exportIndex = simulatorJob.indexOf('Export the Sentry build env');
+    const prebuildIndex = simulatorJob.indexOf('expo prebuild --platform ios');
+    expect(exportIndex).toBeGreaterThan(-1);
+    expect(prebuildIndex).toBeGreaterThan(-1);
+    expect(exportIndex).toBeLessThan(prebuildIndex);
+  });
+
+  it('exports the crash-test flag before prebuild on iOS, and defaults it off', () => {
+    const simulatorJob = readIosJob('simulator');
+    const exportIndex = simulatorJob.indexOf('Export the crash-test flag');
+    const prebuildIndex = simulatorJob.indexOf('expo prebuild --platform ios');
+    expect(exportIndex).toBeGreaterThan(-1);
+    expect(exportIndex).toBeLessThan(prebuildIndex);
+
+    // Parsed, not substring-matched, for the reason the Android copy gives.
+    expect(iosWorkflow.on.workflow_dispatch.inputs.crash_test.type).toBe('boolean');
+    expect(iosWorkflow.on.workflow_dispatch.inputs.crash_test.default).toBe(false);
+  });
+
+  it('never runs a probe on the weekly schedule', () => {
+    // `inputs` are all empty on a cron run. The job-level boolean names the
+    // event rather than leaning on an input default, the same trap the job's
+    // own `if:` documents.
+    expect(withoutComments(readIosJob('simulator'))).toContain(
+      "CRASH_TEST: ${{ github.event_name == 'workflow_dispatch' && inputs.crash_test == true }}"
+    );
+  });
+
+  it('keeps the Sentry export off the plain compile check', () => {
+    // The default dispatch and the weekly cron must stay exactly what they
+    // were: no secrets read, nothing uploaded to Sentry. Gating on
+    // HAS_SENTRY alone would make every simulator build upload symbols.
+    const exportStep = requireStep('simulator', 'Export the Sentry build env');
+    expect(exportStep.if).toBe("env.CRASH_TEST == 'true' && env.HAS_SENTRY == 'true'");
+  });
+
+  it('refuses a crash test without Sentry configured', () => {
+    // A 25-minute build whose only purpose is a delivered event, and which
+    // would report nowhere, is worth failing in the first second.
+    const refusal = requireStep('simulator', 'Refuse a crash test without Sentry configured');
+    expect(refusal.if).toBe("env.CRASH_TEST == 'true' && env.HAS_SENTRY != 'true'");
+  });
+
+  it('refuses a probe build that is also a TestFlight submission, in both build jobs', () => {
+    // iOS has no plan job, so the refusal is the first step of both build
+    // jobs: at least one of them runs on any dispatch, whatever `target` says.
+    for (const jobName of ['simulator', 'device']) {
+      const refusal = requireStep(jobName, 'Refuse a probe build that is also a store submission');
+      expect(refusal.if).toContain('inputs.crash_test == true');
+      expect(refusal.if).toContain("inputs.submit == 'testflight'");
+    }
+    // The submit job will not run for a probe build even if the refusal were
+    // ever removed, mirroring submit-play on Android.
+    expect(iosWorkflow.jobs['submit-testflight'].if).toContain('inputs.crash_test != true');
+    // The refusal compares against the literal 'testflight'; a changed default
+    // would turn it into a refusal of every ordinary dispatch.
+    expect(iosWorkflow.on.workflow_dispatch.inputs.submit.default).toBe('none');
+  });
+
+  it('refuses a probe build combined with the screenshot capture', () => {
+    // A screenshot run skips the `smoke` step, which is the only writer of
+    // `steps.smoke.outputs.device-id`, so the probe flows would run against
+    // `maestro --device ""` and fail after a 25-minute build.
+    const refusal = requireStep('simulator', 'Refuse a probe build combined with the screenshot capture');
+    expect(refusal.if).toContain('inputs.crash_test == true');
+    expect(refusal.if).toContain("inputs.screenshots == 'true'");
+  });
+
+  it('ad-hoc signs the probe builds', () => {
+    // An unsigned Release app boots with errSecMissingEntitlement rejections
+    // from expo-secure-store and expo-notifications, which the SDK's
+    // unhandled-rejection tracking would report into the very run meant to
+    // produce two clean events. `withoutComments` because the comment above
+    // the line names SIGN_AD_HOC too.
+    expect(withoutComments(readIosJob('simulator'))).toContain(
+      "SIGN_AD_HOC: ${{ (inputs.screenshots == 'true' || inputs.crash_test == true) && '1' || '' }}"
+    );
+  });
+
+  it('asserts a dSYM was produced for a crash-test build', () => {
+    // The Sentry debug-files phase uploads whatever dSYM the build emitted.
+    // With none, the native crash arrives as bare addresses and the run
+    // still reads green.
+    const verifyStep = requireStep('simulator', 'Verify an app bundle was produced');
+    expect(verifyStep.run).toContain('.app.dSYM');
+  });
+
+  it('keeps the simulator booted and installs Maestro for a probe run', () => {
+    const smokeStep = requireStep('simulator', 'Launch the app on a simulator');
+    expect(smokeStep.env?.KEEP_SIMULATOR_BOOTED).toContain('inputs.crash_test == true');
+    const installStep = requireStep('simulator', 'Install Maestro and its iOS driver');
+    expect(installStep.if).toContain('inputs.crash_test == true');
+  });
+
+  it('drives the crash-test flows against the simulator the smoke step booted', () => {
+    const flowsStep = requireStep('simulator', 'Run the crash-test flows');
+    expect(flowsStep.if).toContain("env.CRASH_TEST == 'true'");
+    expect(flowsStep.env?.MAESTRO_DEVICE).toBe('${{ steps.smoke.outputs.device-id }}');
+    // A renamed flow otherwise fails deep into a run, after the build.
+    for (const flowPath of ['.maestro/probes/crash-test-js.yaml', '.maestro/probes/crash-test-native.yaml']) {
+      expect(flowsStep.run).toContain(flowPath);
+      expect(existsSync(`${repositoryRoot}${flowPath}`), `${flowPath} is missing`).toBe(true);
+    }
+  });
+
+  it('relaunches the app after each crash so the stored envelopes are sent', () => {
+    // sentry-cocoa stores a fatal event's envelope to disk and sends it on the
+    // NEXT launch (RNSentry.mm's storeEnvelope for hardCrashed), and that is
+    // true of the JS throw as much as the native crash. A flow that taps and
+    // never relaunches proves the crash happened and delivers nothing.
+    const flowsStep = requireStep('simulator', 'Run the crash-test flows');
+    const sequence = (flowsStep.run ?? '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith('run_flow ') || line === 'relaunch_and_flush')
+      .map((line) => (line.startsWith('run_flow ') ? 'run_flow' : 'relaunch_and_flush'));
+    expect(sequence).toEqual(['run_flow', 'relaunch_and_flush', 'run_flow', 'relaunch_and_flush']);
+  });
+
+  it('uploads the probe evidence even when a flow fails', () => {
+    // The crash reports, the unified log and the Maestro debug output are
+    // what turns a silent non-delivery into a diagnosable one, so they must
+    // survive a red step. Maestro writes under a dot directory, hence the
+    // hidden-files flag (the screenshot artifact learned the same lesson).
+    const collectStep = requireStep('simulator', 'Collect the crash evidence');
+    expect(collectStep.if).toContain('always()');
+    const uploadStep = requireStep('simulator', 'Upload the probe evidence');
+    expect(uploadStep.if).toContain('always()');
+    expect(uploadStep.with?.['include-hidden-files']).toBe(true);
   });
 });
 
