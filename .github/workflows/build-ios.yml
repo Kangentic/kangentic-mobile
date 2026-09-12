@@ -889,23 +889,50 @@ jobs:
         if: env.NSE_PROBE == 'true'
         env:
           APP_PATH: ${{ steps.verify.outputs.app-path }}
+          SCHEME: ${{ steps.xcode.outputs.scheme }}
         run: |
           set -euo pipefail
           expected_group="$EXPO_PUBLIC_KANGENTIC_IOS_KEYCHAIN_GROUP"
-          for bundle in "$APP_PATH" "$APP_PATH/PlugIns/KangenticNSE.appex"; do
+
+          # WHERE A SIMULATOR BUILD KEEPS ITS ENTITLEMENTS. A device build
+          # signs them into the code signature, which `codesign -d
+          # --entitlements` reads back. A simulator build does not: Xcode
+          # processes the target's entitlements into `<product>-Simulated.xcent`
+          # and LINKS it into the executable's `__TEXT,__entitlements` section
+          # (`LD_ENTITLEMENTS_SECTION` in the build log), which is what the
+          # simulator's security daemon reads. `codesign` reported an empty
+          # dict for the app on run 34707623264 while the build log showed the
+          # section holding both keychain groups. So: the signature first, and
+          # the Mach-O section when the signature carries nothing.
+          read_entitlements() {
+            local bundle="$1" executable="$2" signed
+            signed="$(codesign -d --entitlements - --xml "$bundle" 2>/dev/null || true)"
+            if echo "$signed" | grep -q '<key>'; then
+              echo "$signed"
+              return
+            fi
+            # otool prints a header line, a "Contents of" line, then one line
+            # per row of `<address><tab><hex bytes>`; drop the address column
+            # and decode the rest as plain hex.
+            otool -s __TEXT __entitlements "$bundle/$executable" 2>/dev/null | tail -n +3 | awk '{ $1 = ""; print }' | xxd -r -p || true
+          }
+          check_bundle() {
+            local bundle="$1" executable="$2" entitlements
             echo "::group::Entitlements of $(basename "$bundle")"
-            entitlements="$(codesign -d --entitlements - --xml "$bundle" 2>/dev/null || codesign -d --entitlements :- "$bundle" 2>/dev/null || true)"
+            entitlements="$(read_entitlements "$bundle" "$executable")"
             echo "$entitlements"
             echo "::endgroup::"
             if [ -z "$entitlements" ]; then
-              echo "::error::$(basename "$bundle") carries no readable entitlements. The ad-hoc signing did not embed any, so the app and the extension cannot share a Keychain group."
+              echo "::error::$(basename "$bundle") carries no readable entitlements in its signature or its __entitlements section, so the app and the extension cannot share a Keychain group."
               exit 1
             fi
             if ! echo "$entitlements" | grep -q "<string>$expected_group</string>"; then
               echo "::error::$(basename "$bundle") does not carry the Keychain group the app was built to write to ($expected_group). Read the group it DOES carry above and correct the literal in 'Export the NSE probe env'."
               exit 1
             fi
-          done
+          }
+          check_bundle "$APP_PATH" "$SCHEME"
+          check_bundle "$APP_PATH/PlugIns/KangenticNSE.appex" "KangenticNSE"
           echo "Both bundles carry keychain-access-group $expected_group."
 
       # THE NSE PROBE. Seeds known push vectors into the shared Keychain from
