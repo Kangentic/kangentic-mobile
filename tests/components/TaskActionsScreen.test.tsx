@@ -136,6 +136,22 @@ describe('TaskActionsScreen', () => {
       expect(mockOpenURL).toHaveBeenCalledWith('HTTPS://github.com/Kangentic/Kangentic-Mobile/pull/42');
     });
 
+    it('keeps the sheet open with the reason when the OS refuses to open the pull request', async () => {
+      // The `.catch` on `Linking.openURL` had no test at all - the mock was a
+      // permanent `mockResolvedValue(true)`, never made to reject. Mirrors the
+      // archive-failure test below for the same handler shape.
+      seedBoard({ withDoneColumn: true, task: linkedPr });
+      mockOpenURL.mockRejectedValueOnce(new Error('No app can handle this link'));
+      renderTaskActions();
+
+      await act(async () => {
+        fireEvent.press(screen.getByTestId('task-action-view-pr'));
+      });
+
+      expect(screen.getByText('No app can handle this link')).toBeTruthy();
+      expect(mockBack).not.toHaveBeenCalled();
+    });
+
     it.each([
       ['javascript:alert(1)'],
       ['http://github.com/Kangentic/kangentic-mobile/pull/42'],

@@ -38,17 +38,89 @@ export interface PrChipPresentation {
   color: TextColorRole;
 }
 
-/** The readiness verdicts that are worth spending title width on. */
-const READINESS_PRESENTATION: Record<string, PrChipPresentation> = {
-  ready: { label: 'ready', color: 'success' },
-  blocked: { label: 'blocked', color: 'warning' },
-  conflicting: { label: 'conflicts', color: 'conflict' },
-  queued: { label: 'queued', color: 'info' },
-  running: { label: 'running', color: 'info' },
-};
+/**
+ * The freshness caveat every spoken verdict carries. Exported so the tests
+ * assert against the string the module actually ships rather than re-typing
+ * it: a copy-edit here must not need a hand-synchronised edit in two test
+ * files to stay honest.
+ */
+export const PR_READINESS_FRESHNESS_CAVEAT = 'as of the last PR refresh';
+
+/** A recognised verdict: one word for the chip, one sentence for a reader. */
+interface ReadinessPresentation {
+  /**
+   * Nested rather than spread alongside `spokenDetail`, so `prChipPresentation`
+   * can hand this straight back without widening its documented return shape:
+   * the chip contract is exactly `{ label, color }`, and a third key leaking
+   * into it would be invisible to `tsc` but visible to every caller.
+   */
+  chip: PrChipPresentation & { label: string };
+  /** The spoken form, minus the caveat, which is appended at the one call site. */
+  spokenDetail: string;
+}
+
+/**
+ * The readiness verdicts that are worth spending title width on, and the ONE
+ * table all three exported functions read. A verdict added here gets its chip
+ * label, its summary word and its spoken form together or not at all, which is
+ * the drift this module cannot afford: a chip that says `blocked` while a
+ * screen reader says `open` describes the same PR two ways.
+ *
+ * A `Map`, deliberately, not an object literal. An object literal inherits
+ * `Object.prototype`, so a wire value that happens to name a member of it
+ * (`constructor`, `toString`, `valueOf`, `__proto__`) would HIT the lookup and
+ * return a function in place of a presentation - the `?? PLAIN_OPEN` fallback
+ * never fires, and the card renders a pill with an undefined label and an
+ * undefined color. `Map.get` misses cleanly for those keys. This is not
+ * hypothetical robustness: the protocol states that a value a client does not
+ * know renders as plain open (see `BoardTaskWire.pr_merge_readiness`), and an
+ * object literal cannot honour that for every string the wire can carry.
+ * `Map.get` also returns `T | undefined`, so the fallback is live code to
+ * `tsc` rather than the dead branch an unchecked index signature makes it.
+ */
+const READINESS_PRESENTATION: ReadonlyMap<string, ReadinessPresentation> = new Map([
+  [
+    'ready',
+    { chip: { label: 'ready', color: 'success' }, spokenDetail: 'Pull request ready to merge' },
+  ],
+  [
+    'blocked',
+    {
+      chip: { label: 'blocked', color: 'warning' },
+      spokenDetail: 'Pull request merge blocked by reviews, checks, or branch rules',
+    },
+  ],
+  [
+    'conflicting',
+    {
+      chip: { label: 'conflicts', color: 'conflict' },
+      spokenDetail: 'Pull request has merge conflicts with the base branch',
+    },
+  ],
+  [
+    'queued',
+    { chip: { label: 'queued', color: 'info' }, spokenDetail: 'Pull request checks or policies are queued' },
+  ],
+  [
+    'running',
+    { chip: { label: 'running', color: 'info' }, spokenDetail: 'Pull request checks or policies are running' },
+  ],
+] satisfies readonly (readonly [string, ReadinessPresentation])[]);
+
+/**
+ * Every verdict this client recognises, derived from the table rather than
+ * retyped. The tests iterate THIS, so a verdict added to the table above is
+ * automatically held to all three functions' contracts instead of passing a
+ * suite whose expectations were hand-copied and never extended.
+ */
+export const PR_READINESS_VERDICTS: readonly string[] = Array.from(READINESS_PRESENTATION.keys());
 
 /** Plain `open`, and the resting appearance for anything without a verdict. */
 const PLAIN_OPEN: PrChipPresentation = { label: null, color: 'success' };
+
+/** Hoisted for the same reason `PLAIN_OPEN` is: a recycled board row renders these on every pass. */
+const MERGED_PRESENTATION: PrChipPresentation = { label: null, color: 'info' };
+const CLOSED_PRESENTATION: PrChipPresentation = { label: null, color: 'danger' };
 
 export function prChipPresentation(
   prState: string | null,
@@ -57,11 +129,11 @@ export function prChipPresentation(
   switch (prState) {
     case 'open':
       if (prMergeReadiness === null) return PLAIN_OPEN;
-      return READINESS_PRESENTATION[prMergeReadiness] ?? PLAIN_OPEN;
+      return READINESS_PRESENTATION.get(prMergeReadiness)?.chip ?? PLAIN_OPEN;
     case 'merged':
-      return { label: null, color: 'info' };
+      return MERGED_PRESENTATION;
     case 'closed':
-      return { label: null, color: 'danger' };
+      return CLOSED_PRESENTATION;
     // `draft`, `null`, and anything unrecognised.
     default:
       return PLAIN_OPEN;
@@ -76,8 +148,8 @@ export function prChipPresentation(
  */
 export function prStateSummary(prState: string | null, prMergeReadiness: string | null): string {
   if (prState === 'open') {
-    const readiness = prMergeReadiness === null ? null : (READINESS_PRESENTATION[prMergeReadiness] ?? null);
-    return readiness?.label ?? 'open';
+    const readiness = prMergeReadiness === null ? undefined : READINESS_PRESENTATION.get(prMergeReadiness);
+    return readiness?.chip.label ?? 'open';
   }
   if (prState === 'draft' || prState === 'merged' || prState === 'closed') return prState;
   return 'open';
@@ -93,24 +165,18 @@ export function prStateSummary(prState: string | null, prMergeReadiness: string 
  * The caveat is not boilerplate: the verdict is only as fresh as the desktop's
  * last PR refresh, and it is resolved from that desktop's own viewpoint, so
  * presenting it as live truth would overpromise.
+ *
+ * Reads `READINESS_PRESENTATION` rather than keeping a parallel switch, so a
+ * verdict added to that table cannot render a visible chip label while falling
+ * through to a spoken "open" here.
  */
 export function prChipAccessibilityLabel(prState: string | null, prMergeReadiness: string | null): string {
-  const asOf = 'as of the last PR refresh';
   if (prState === 'open') {
-    switch (prMergeReadiness) {
-      case 'ready':
-        return `Pull request ready to merge, ${asOf}`;
-      case 'blocked':
-        return `Pull request merge blocked by reviews, checks, or branch rules, ${asOf}`;
-      case 'conflicting':
-        return `Pull request has merge conflicts with the base branch, ${asOf}`;
-      case 'queued':
-        return `Pull request checks or policies are queued, ${asOf}`;
-      case 'running':
-        return `Pull request checks or policies are running, ${asOf}`;
-      default:
-        return 'Pull request open';
-    }
+    const readiness = prMergeReadiness === null ? undefined : READINESS_PRESENTATION.get(prMergeReadiness);
+    // No verdict, or one this client does not know: there is nothing to be
+    // stale about, so the caveat would be a claim rather than a hedge.
+    if (readiness === undefined) return 'Pull request open';
+    return `${readiness.spokenDetail}, ${PR_READINESS_FRESHNESS_CAVEAT}`;
   }
   if (prState === 'draft') return 'Pull request in draft';
   if (prState === 'merged') return 'Pull request merged';
