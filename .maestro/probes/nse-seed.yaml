@@ -34,19 +34,20 @@ appId: com.kangentic.mobile
     id: "settings-nse-probe-seed"
 # The OS permission alert is platform chrome we do not render, so its button
 # is selected by label (the documented carve-out in
-# .claude/rules/e2e-maestro-runs.md). It appears a beat after the tap, so
-# this polls a few hierarchy reads for it rather than checking once; a build
-# where permission was already decided simply never sees it.
-- repeat:
-    times: 6
-    commands:
-      - runFlow:
-          when:
-            visible:
-              text: "Allow"
-          commands:
-            - tapOn:
-                text: "Allow"
+# .claude/rules/e2e-maestro-runs.md). It appears a beat after the tap, hence
+# the wait. A plain wait-then-tap, not a polling loop: run 34709809847's
+# `repeat` of a guarded tap answered the alert on its first pass and then
+# saw "Allow" again while the alert was animating out, tapped nothing, and
+# failed a seed that had already succeeded ("Seeded, permission granted"
+# was on screen in the failure frame). A CI simulator is fresh per job, so
+# the alert always appears; a reused simulator that already decided would
+# time out here, and that is the right answer for a probe.
+- extendedWaitUntil:
+    visible:
+      text: "Allow"
+    timeout: 15000
+- tapOn:
+    text: "Allow"
 # The seeded label renders only when both the Keychain writes and the
 # permission request resolved. A seed failure renders
 # settings-nse-probe-seed-error with the message instead, and this times out
